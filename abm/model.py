@@ -32,10 +32,21 @@ class SocialGPModel(mesa.Model):
         alpha: float = 0.6,
         network_type: str = "fully_connected",
         reward_noise_sd : float = 0.001,
-        seed: int | None = None,
         corr_matrix: np.ndarray | None = None,
-    ):
-        super().__init__(seed=seed)
+        **kwargs,
+    ):      
+        # Handle seed/rng from kwargs to support mesa.batch_run
+        # If 'seed' is passed in parameters, it ends up in kwargs.
+        seed = kwargs.pop("seed", None)
+        rng = kwargs.pop("rng", None)
+        
+        # If seed is provided, valid rng is derived from it, so we can ignore any passed rng 
+        # to avoid "both seed and rng provided" error in Model.__init__
+        if seed is not None:
+            rng = None
+            
+        super().__init__(seed=seed, rng=rng, **kwargs)
+
         self.num_agents = n
         self.grid_size = grid_size
         self.reward_noise_sd = reward_noise_sd
