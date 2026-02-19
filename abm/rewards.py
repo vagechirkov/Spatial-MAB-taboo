@@ -61,3 +61,216 @@ def check_correlations_matrix(parent, children, R_target, tol=0.1):
     i, j = np.triu_indices(R_target.shape[0], k=1)
     diffs = np.abs(C[i, j] - R_target[i, j])
     return np.all(diffs <= tol)
+
+def _gabor_filter_2d(
+    grid_size,
+    frequency,
+    theta=0.0,
+    sigma=None,
+    phase=0.0,
+    center=None,
+):
+    """
+    Generate a 2D Gabor filter pattern.
+    
+    Parameters
+    ----------
+    grid_size : int
+        Size of the grid (grid_size x grid_size)
+    frequency : float
+        Spatial frequency of the sinusoidal component (cycles per grid)
+    theta : float, default=0.0
+        Orientation angle in radians (0 = horizontal stripes)
+    sigma : float, optional
+        Standard deviation of the Gaussian envelope. If None, uses frequency-based default.
+    phase : float, default=0.0
+        Phase offset of the sinusoidal component in radians
+    center : tuple of float, optional
+        Center of the Gabor filter. If None, uses grid center.
+    
+    Returns
+    -------
+    gabor : ndarray
+        2D array of shape (grid_size, grid_size) with Gabor filter pattern
+    """
+    if center is None:
+        center = (grid_size / 2.0, grid_size / 2.0)
+    
+    if sigma is None:
+        # Default sigma based on frequency: roughly 1/4 of wavelength
+        wavelength = grid_size / frequency
+        sigma = wavelength / 4.0
+    
+    # Create coordinate grids
+    x = np.arange(grid_size)
+    y = np.arange(grid_size)
+    X, Y = np.meshgrid(x, y)
+    
+    # Center coordinates
+    Xc = X - center[0]
+    Yc = Y - center[1]
+    
+    # Rotate coordinates according to orientation
+    X_rot = Xc * np.cos(theta) + Yc * np.sin(theta)
+    Y_rot = -Xc * np.sin(theta) + Yc * np.cos(theta)
+    
+    # Gaussian envelope
+    gaussian = np.exp(-(X_rot**2 + Y_rot**2) / (2 * sigma**2))
+    
+    # Sinusoidal component
+    # Convert frequency from cycles per grid to cycles per pixel
+    freq_pixel = frequency / grid_size
+    sinusoidal = np.cos(2 * np.pi * freq_pixel * X_rot + phase)
+    
+    # Gabor filter is the product
+    gabor = gaussian * sinusoidal
+    
+    return gabor
+
+def make_parent_and_children_gabor(
+    rng,
+    grid_size=11,
+    n_children=4,
+    frequency=2.0,
+    theta_parent=0.0,
+    sigma=None,
+    phase_parent=None,
+    correlation=0.6,
+    theta_children=None,
+    phase_children=None,
+):
+    """
+    Generate one parent map + n_children child maps using Gabor filters.
+    
+    The parent is generated with a Gabor filter. Each child is generated to have
+    a specified correlation r with the parent while maintaining the same frequency.
+    Children are created by mixing the parent pattern with independent Gabor patterns.
+    
+    Parameters
+    ----------
+    rng : numpy.random.Generator
+        Random number generator
+    grid_size : int, default=11
+        Size of the grid (grid_size x grid_size)
+    n_children : int, default=4
+        Number of child maps to generate
+    frequency : float, default=2.0
+        Spatial frequency of the Gabor filter (cycles per grid)
+    theta_parent : float, default=0.0
+        Orientation angle for parent in radians (0 = horizontal stripes)
+    sigma : float, optional
+        Standard deviation of the Gaussian envelope. If None, uses frequency-based default.
+    phase_parent : float, optional
+        Phase offset for parent in radians. If None, randomly sampled.
+    correlation : float, default=0.6
+        Target correlation coefficient between parent and each child
+    theta_children : array-like of float, optional
+        Orientation angles for children in radians. If None, randomly sampled.
+    phase_children : array-like of float, optional
+        Phase offsets for children in radians. If None, randomly sampled.
+    
+    Returns
+    -------
+    parent : ndarray
+        2D array of shape (grid_size, grid_size) with normalized parent Gabor pattern
+    children : list of ndarray
+        List of n_children 2D arrays, each normalized to [0, 1]
+    """
+    if not (-1 <= correlation <= 1):
+        raise ValueError(f"Correlation must be in [-1, 1], got {correlation}")
+    
+    # Generate parent Gabor pattern
+    if phase_parent is None:
+        phase_parent = rng.uniform(0, 2 * np.pi)
+    
+    parent = _gabor_filter_2d(
+        grid_size=grid_size,
+        frequency=frequency,
+        theta=theta_parent,
+        sigma=sigma,
+        phase=phase_parent,
+    )
+    
+    # Normalize parent to zero mean and unit variance for correlation mixing
+    parent_flat = parent.ravel()
+    parent_mean = parent_flat.mean()
+    parent_std = parent_flat.std()
+    if parent_std < 1e-10:
+        parent_std = 1.0
+    parent_normalized = (parent_flat - parent_mean) / parent_std
+    
+    # Generate children
+    children = []
+    
+    if theta_children is None:
+        theta_children = [rng.uniform(0, 2 * np.pi) for _ in range(n_children)]
+    elif len(theta_children) != n_children:
+        raise ValueError(f"theta_children must have length {n_children}, got {len(theta_children)}")
+    
+    if phase_children is None:
+        phase_children = [rng.uniform(0, 2 * np.pi) for _ in range(n_children)]
+    elif len(phase_children) != n_children:
+        raise ValueError(f"phase_children must have length {n_children}, got {len(phase_children)}")
+    
+    for i in range(n_children):
+        # Generate independent Gabor pattern with same frequency
+        child_independent = _gabor_filter_2d(
+            grid_size=grid_size,
+            frequency=frequency,
+            theta=theta_children[i],
+            sigma=sigma,
+            phase=phase_children[i],
+        )
+        
+        # Normalize independent pattern
+        child_indep_flat = child_independent.ravel()
+        child_indep_mean = child_indep_flat.mean()
+        child_indep_std = child_indep_flat.std()
+        if child_indep_std < 1e-10:
+            child_indep_std = 1.0
+        child_indep_normalized = (child_indep_flat - child_indep_mean) / child_indep_std
+        
+        # Mix parent and independent pattern to achieve target correlation
+        # child = r * parent + sqrt(1 - r^2) * independent
+        # This ensures correlation(child, parent) = r
+        r = correlation
+        child_mixed = r * parent_normalized + np.sqrt(1 - r**2) * child_indep_normalized
+        
+        # Reshape and normalize to [0, 1]
+        child_grid = child_mixed.reshape(grid_size, grid_size)
+        children.append(_min_max(child_grid))
+    
+    # Normalize parent to [0, 1] for consistency
+    parent_normalized_grid = _min_max(parent)
+    
+    return parent_normalized_grid, children
+
+def check_correlations_gabor(parent, children, target_correlation, tol=0.1):
+    """
+    Utility to verify empirical correlations between parent and children match target.
+    
+    Parameters
+    ----------
+    parent : ndarray
+        2D parent grid
+    children : list of ndarray
+        List of 2D child grids
+    target_correlation : float
+        Expected correlation between parent and each child
+    tol : float, default=0.1
+        Tolerance for correlation difference
+    
+    Returns
+    -------
+    bool
+        True if all correlations are within tolerance
+    """
+    parent_flat = parent.ravel()
+    correlations = []
+    for child in children:
+        child_flat = child.ravel()
+        corr = np.corrcoef(parent_flat, child_flat)[0, 1]
+        correlations.append(corr)
+    
+    diffs = np.abs(np.array(correlations) - target_correlation)
+    return np.all(diffs <= tol), correlations
