@@ -138,6 +138,7 @@ def make_parent_and_children_gabor(
     correlation=0.6,
     theta_children=None,
     phase_children=None,
+    center=None,
 ):
     """
     Generate one parent map + n_children child maps using Gabor filters.
@@ -168,6 +169,8 @@ def make_parent_and_children_gabor(
         Orientation angles for children in radians. If None, randomly sampled.
     phase_children : array-like of float, optional
         Phase offsets for children in radians. If None, randomly sampled.
+    center : tuple of float, optional
+        Center of the Gabor filter. If None, uses grid center.
     
     Returns
     -------
@@ -189,6 +192,7 @@ def make_parent_and_children_gabor(
         theta=theta_parent,
         sigma=sigma,
         phase=phase_parent,
+        center=center,
     )
     
     # Normalize parent to zero mean and unit variance for correlation mixing
@@ -220,6 +224,7 @@ def make_parent_and_children_gabor(
             theta=theta_children[i],
             sigma=sigma,
             phase=phase_children[i],
+            center=center,
         )
         
         # Normalize independent pattern
@@ -245,7 +250,7 @@ def make_parent_and_children_gabor(
     
     return parent_normalized_grid, children
 
-def check_correlations_gabor(parent, children, target_correlation, tol=0.1):
+def check_correlations(parent, children, target_correlation, tol=0.1):
     """
     Utility to verify empirical correlations between parent and children match target.
     
@@ -274,3 +279,167 @@ def check_correlations_gabor(parent, children, target_correlation, tol=0.1):
     
     diffs = np.abs(np.array(correlations) - target_correlation)
     return np.all(diffs <= tol), correlations
+
+
+def _dog_filter_2d(
+    grid_size,
+    frequency: float = 2.0,
+    sigma_inner: float | None = None,
+    sigma_outer: float | None = None,
+    center=None,
+    outer_factor: float = 2.0,
+):
+    """
+    Difference-of-Gaussians (DoG) pattern, a Mexican-hat–like filter.
+
+    Parameters
+    ----------
+    grid_size : int
+        Size of the grid (grid_size x grid_size)
+    frequency : float, default=2.0
+        Controls base spatial scale (cycles per grid). Higher -> smaller sigmas.
+    sigma_inner : float, optional
+        Inner Gaussian width. If None, derived from (grid_size, frequency).
+    sigma_outer : float, optional
+        Outer Gaussian width. If None, set to outer_factor * sigma_inner.
+    center : tuple of float, optional
+        Center (x, y). If None, uses grid center.
+
+    Returns
+    -------
+    dog : ndarray
+        2D array of shape (grid_size, grid_size) with zero-mean DoG values.
+    """
+    if frequency <= 0:
+        raise ValueError(f"frequency must be > 0, got {frequency}")
+    if outer_factor <= 0:
+        raise ValueError(f"outer_factor must be > 0, got {outer_factor}")
+    if center is None:
+        center = ((grid_size - 1) / 2.0, (grid_size - 1) / 2.0)
+
+    # If sigmas are not provided, derive them from frequency.
+    if sigma_inner is None:
+        # Match the Gabor convention: wavelength = grid_size / frequency; sigma ≈ wavelength / 4
+        wavelength = grid_size / frequency
+        sigma_inner = wavelength / 4.0
+    if sigma_outer is None:
+        sigma_outer = outer_factor * float(sigma_inner)
+
+    x = np.arange(grid_size)
+    y = np.arange(grid_size)
+    X, Y = np.meshgrid(x, y)
+    Xc = X - center[0]
+    Yc = Y - center[1]
+    r2 = Xc**2 + Yc**2
+
+    def _gauss(r2_arr, s):
+        return np.exp(-r2_arr / (2.0 * (s**2)))
+
+    g_inner = _gauss(r2, float(sigma_inner))
+    g_outer = _gauss(r2, float(sigma_outer))
+    dog = g_inner - g_outer
+    dog = dog - dog.mean()
+    return dog
+
+
+def make_parent_and_children_mexican_hat(
+    rng,
+    grid_size=11,
+    n_children=4,
+    frequency: float = 2.0,
+    sigma_inner=None,
+    sigma_outer=None,
+    correlation=0.6,
+    center=None,
+    jitter_center_sd=0.75,
+    jitter_sigma_inner_sd=None,
+    jitter_sigma_outer_sd=None,
+):
+    """
+    Generate one parent map + n_children child maps using a Difference-of-Gaussians filter.
+
+    The parent is generated with a DoG (inner minus outer Gaussian) pattern. Each
+    child is generated to have a specified correlation r with the parent while
+    maintaining a similar frequency/scale and inner/outer widths (with jitter).
+
+    Children are created by mixing the parent pattern with independent Mexican-hat
+    patterns:
+        child = r * parent_z + sqrt(1 - r^2) * indep_z
+    where *_z are standardized (zero-mean, unit-variance) flattened maps.
+    """
+    if not (-1 <= correlation <= 1):
+        raise ValueError(f"Correlation must be in [-1, 1], got {correlation}")
+
+    parent = _dog_filter_2d(
+        grid_size=grid_size,
+        frequency=frequency,
+        sigma_inner=sigma_inner,
+        sigma_outer=sigma_outer,
+        center=center,
+    )
+
+    # Standardize for correlation mixing
+    parent_flat = parent.ravel()
+    parent_mean = parent_flat.mean()
+    parent_std = parent_flat.std()
+    if parent_std < 1e-10:
+        parent_std = 1.0
+    parent_z = (parent_flat - parent_mean) / parent_std
+
+    children = []
+    r = correlation
+    mix_b = np.sqrt(1 - r**2)
+
+    for _ in range(n_children):
+        # Create an "independent" DoG map with *almost* the same parameters,
+        # but jittered so it's distinct even if the user provided a fixed `center`.
+        base_center = center if center is not None else ((grid_size - 1) / 2.0, (grid_size - 1) / 2.0)
+        c = (
+            float(base_center[0] + rng.normal(0.0, jitter_center_sd)),
+            float(base_center[1] + rng.normal(0.0, jitter_center_sd)),
+        )
+
+        # Base widths for jitter: use provided sigmas, otherwise derive from (grid_size, frequency)
+        if sigma_inner is not None:
+            base_sigma_inner = float(sigma_inner)
+        else:
+            wavelength = grid_size / frequency
+            base_sigma_inner = wavelength / 4.0
+        base_sigma_outer = float(sigma_outer) if sigma_outer is not None else 2.0 * base_sigma_inner
+
+        s_in_sd = (0.05 * base_sigma_inner) if jitter_sigma_inner_sd is None else float(jitter_sigma_inner_sd)
+        s_out_sd = (0.05 * base_sigma_outer) if jitter_sigma_outer_sd is None else float(jitter_sigma_outer_sd)
+
+        sigma_inner_i = float(max(1e-6, base_sigma_inner + rng.normal(0.0, s_in_sd)))
+        sigma_outer_i = float(max(1e-6, base_sigma_outer + rng.normal(0.0, s_out_sd)))
+
+        indep = _dog_filter_2d(
+            grid_size=grid_size,
+            frequency=frequency,
+            sigma_inner=sigma_inner_i,
+            sigma_outer=sigma_outer_i,
+            center=c
+        )
+        indep_flat = indep.ravel()
+        indep_mean = indep_flat.mean()
+        indep_std = indep_flat.std()
+        if indep_std < 1e-10:
+            indep_std = 1.0
+        indep_z = (indep_flat - indep_mean) / indep_std
+
+        # Orthogonalize indep against parent to guarantee corr(child, parent)=r.
+        denom = float(np.dot(parent_z, parent_z))
+        if denom < 1e-12:
+            indep_orth = indep_z
+        else:
+            indep_orth = indep_z - (np.dot(parent_z, indep_z) / denom) * parent_z
+        indep_orth_std = indep_orth.std()
+        if indep_orth_std < 1e-10:
+            indep_orth_std = 1.0
+        indep_orth = (indep_orth - indep_orth.mean()) / indep_orth_std
+
+        child_mixed = r * parent_z + mix_b * indep_orth
+        child_grid = child_mixed.reshape(grid_size, grid_size)
+        children.append(_min_max(child_grid))
+
+    return _min_max(parent), children
