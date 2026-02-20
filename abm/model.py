@@ -8,6 +8,8 @@ from mesa import DataCollector
 from mesa.discrete_space import Network
 from .rewards import (
     make_parent_and_children_cholesky,
+    make_parent_and_children_gabor,
+    make_parent_and_children_mexican_hat,
     build_corr_matrix_bare_bones,
 )
 
@@ -32,6 +34,8 @@ class SocialGPModel(mesa.Model):
         alpha: float = 0.6,
         network_type: str = "fully_connected",
         reward_noise_sd : float = 0.001,
+        reward_env_type: str = "gp",
+        reward_env_params: dict | None = None,
         corr_matrix: np.ndarray | None = None,
         **kwargs,
     ):      
@@ -51,17 +55,48 @@ class SocialGPModel(mesa.Model):
         self.grid_size = grid_size
         self.reward_noise_sd = reward_noise_sd
 
-        # Generate correlated reward environments
-        if corr_matrix is None:
-            corr_matrix = build_corr_matrix_bare_bones(n + 1)
-        
-        parent, child_maps = make_parent_and_children_cholesky(
-            rng=self.rng,
-            grid_size=grid_size,
-            n_children=n,
-            length_scale=2.0,
-            corr_matrix=corr_matrix,
-        )
+        # Generate reward environments
+        reward_env_params = {} if reward_env_params is None else dict(reward_env_params)
+
+        if reward_env_type == "gp":
+            # Correlated GP landscapes via a task correlation matrix
+            if corr_matrix is None:
+                corr_matrix = build_corr_matrix_bare_bones(n + 1)
+            env_length_scale = float(reward_env_params.pop("length_scale", 2.0))
+            parent, child_maps = make_parent_and_children_cholesky(
+                rng=self.rng,
+                grid_size=grid_size,
+                n_children=n,
+                length_scale=env_length_scale,
+                corr_matrix=corr_matrix,
+                **reward_env_params,
+            )
+        elif reward_env_type == "gabor":
+            # Parent + children with target correlation (scalar) and shared frequency
+            parent, child_maps = make_parent_and_children_gabor(
+                rng=self.rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+        elif reward_env_type in ("mexican_hat", "dog"):
+            # Currently implemented as DoG-based mexican hat
+            parent, child_maps = make_parent_and_children_mexican_hat(
+                rng=self.rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+        else:
+            raise ValueError(
+                "Unknown reward_env_type. Expected one of: "
+                "'gp', 'gabor', 'mexican_hat' (alias: 'dog'). "
+                f"Got: {reward_env_type!r}"
+            )
+
+        # Keep reference (handy for debugging/visualization)
+        self.reward_parent = parent
+        self.reward_maps = child_maps
 
         # Build social network
         G = _build_network(network_type, n)
