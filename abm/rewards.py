@@ -336,7 +336,7 @@ def _dog_filter_2d(
         return np.exp(-r2_arr / (2.0 * (s**2)))
 
     g_inner = _gauss(r2, float(sigma_inner))
-    g_outer = _gauss(r2, float(sigma_outer))
+    g_outer = _gauss(r2, float(sigma_outer)) * sigma_inner/sigma_outer
     dog = g_inner - g_outer
     dog = dog - dog.mean()
     return dog
@@ -443,3 +443,19 @@ def make_parent_and_children_mexican_hat(
         children.append(_min_max(child_grid))
 
     return _min_max(parent), children
+
+def make_mexican_hat_reward(
+    grid_size=11,
+    frequency=2.0,
+    sigma_inner=None,
+    sigma_outer=None,
+    center=None,
+):
+    """Utility to generate a single Mexican-hat–like reward map."""
+    return _min_max(_dog_filter_2d(
+        grid_size=grid_size,
+        frequency=frequency,
+        sigma_inner=sigma_inner,
+        sigma_outer=sigma_outer,
+        center=center,
+    ))
