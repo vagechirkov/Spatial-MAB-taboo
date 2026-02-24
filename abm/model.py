@@ -54,6 +54,8 @@ class SocialGPModel(mesa.Model):
         self.num_agents = n
         self.grid_size = grid_size
         self.reward_noise_sd = reward_noise_sd
+        # Set reward peak location (used for gabor and mexican hat)
+        self.reward_peak = np.array(reward_env_params['center']) if reward_env_params and 'center' in reward_env_params else np.array((grid_size // 2, grid_size // 2))
 
         # Generate reward environments
         reward_env_params = {} if reward_env_params is None else dict(reward_env_params)
@@ -123,15 +125,55 @@ class SocialGPModel(mesa.Model):
             alpha=alpha,
         )
 
+        def dist_to_peak(agent):
+            '''
+            Returns the distance of the agent's last choice to the reward peak
+            '''
+            return np.linalg.norm(np.array(agent.last_choice) - self.reward_peak)
+        
+        def prob_near_peak(agents):
+            '''
+            Returns the probability of agents being near the reward peak
+            '''
+            near_peaks = [dist_to_peak(a) < 1.0 for a in agents]
+            return np.mean(near_peaks)
+        
+        def prob_local_max(agents):
+            '''
+            Returns the probability of agents being at a local max
+            TODO: Temporary local max definition: reward between 0.2 and 0.4 (to be replaced with actual local max detection logic)
+            '''
+            rewards = np.array([a.last_reward for a in agents]) + 0.5
+            local_maxes = np.logical_and(rewards > 0.2, rewards < 0.4)
+            return np.mean(local_maxes)
+        
+        def most_common_choice(agents):
+            '''
+            Returns the most common choice among agents in the last step
+            '''
+            choices = [a.last_choice for a in agents]
+            if not choices:
+                return None
+            return pd.Series(choices).mode()[0]
+
         self.datacollector = DataCollector(
             model_reporters={
-                "avg_cumulative_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) + 0.5 * m.steps,
-                "avg_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) / m.steps + 0.5,
+                # "avg_cumulative_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) + 0.5 * m.steps,
+                # "avg_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) / m.steps + 0.5,
+                # Mean/SE reward in last step across agents
+                "mean_reward": lambda m: np.mean([a.last_reward for a in m.grid.agents]) + 0.5,
+                # "se_reward": lambda m: np.std([a.last_reward for a in m.grid.agents]) / np.sqrt(self.num_agents),
+                # "prob_near_peak": lambda m: prob_near_peak(m.grid.agents),
+                # "prob_local_max": lambda m: prob_local_max(m.grid.agents),
+                # "most_common_choice": lambda m: most_common_choice(m.grid.agents)
             },
             agent_reporters={
+                "policy": lambda a: a.policy_grid,
                 "choice": lambda a: a.last_choice,
                 "reward": lambda a: a.last_reward + 0.5,
                 "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
+                "near_peak": lambda a: dist_to_peak(a) < 1.0,
+                "local_max": lambda a: a.last_reward > 0.2 and a.last_reward < 0.4, 
             },
         )
 
