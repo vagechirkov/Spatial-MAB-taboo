@@ -1,0 +1,13 @@
+jupyterlab>=4.4.3
+ipykernel
+mesa[all]>=3.2.0
+wandb[media,sweeps]>=0.20.1
+scikit-learn
+matplotlib
+seaborn
+scipy
+pandas
+
+[dev]
+pytest>=8.4.0
+ruff>=0.11.13

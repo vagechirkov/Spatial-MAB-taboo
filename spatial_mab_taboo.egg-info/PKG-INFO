@@ -1,0 +1,67 @@
+Metadata-Version: 2.4
+Name: spatial-mab-taboo
+Version: 0.1.0
+Summary: Spatial MAB experiments
+Author-email: valery <vagechirkov@gmail.com>, gerardo <parra.gpg@gmail.com>
+License: MIT
+Requires-Python: <3.14,>=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: jupyterlab>=4.4.3
+Requires-Dist: ipykernel
+Requires-Dist: mesa[all]>=3.2.0
+Requires-Dist: wandb[media,sweeps]>=0.20.1
+Requires-Dist: scikit-learn
+Requires-Dist: matplotlib
+Requires-Dist: seaborn
+Requires-Dist: scipy
+Requires-Dist: pandas
+Provides-Extra: dev
+Requires-Dist: pytest>=8.4.0; extra == "dev"
+Requires-Dist: ruff>=0.11.13; extra == "dev"
+Dynamic: license-file
+
+# Spatial-MAB-taboo
+
+
+## Setup
+
+This project uses `uv` for environment management. To set up the virtual environment and install dependencies, run:
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e .[dev]
+```
+
+### Jupyter Kernel
+
+To use the virtual environment in a Jupyter notebook, register the kernel:
+
+```bash
+python -m ipykernel install --user --name spatial-mab --display-name "Python (spatial-mab)"
+```
+
+Then, when opening `illustration.ipynb`, select the **Python (spatial-mab)** kernel.
+
+### Starting Jupyter Lab
+
+To start the Jupyter Lab server:
+
+```bash
+uv run jupyter lab
+```
+
+Start jupyter lab on remote server:
+
+```bash
+source .venv/bin/activate && jupyter lab --no-browser --ip=0.0.0.0 --port=8888
+```
+
+## Usage
+
+To run the simulation:
+
+```bash
+uv run python3 abm/model.py
+```
