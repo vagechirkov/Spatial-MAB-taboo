@@ -336,7 +336,7 @@ def _dog_filter_2d(
         return np.exp(-r2_arr / (2.0 * (s**2)))
 
     g_inner = _gauss(r2, float(sigma_inner))
-    g_outer = _gauss(r2, float(sigma_outer)) * sigma_inner/sigma_outer
+    g_outer = _gauss(r2, float(sigma_outer)) * sigma_inner/sigma_outer * 1.5
     dog = g_inner - g_outer
     dog = dog - dog.mean()
     return dog
