@@ -135,7 +135,8 @@ class SocialGPModel(mesa.Model):
             '''
             Returns the probability of agents being near the reward peak
             '''
-            near_peaks = [dist_to_peak(a) < 1.0 for a in agents]
+            # near_peaks = [dist_to_peak(a) < 2.0 for a in agents] # Distance on grid
+            near_peaks = np.array([a.last_reward > 0.47 for a in agents])   # Difference from max value
             return np.mean(near_peaks)
         
         def prob_local_max(agents):
@@ -144,7 +145,7 @@ class SocialGPModel(mesa.Model):
             TODO: Temporary local max definition: reward between 0.2 and 0.4 (to be replaced with actual local max detection logic)
             '''
             rewards = np.array([a.last_reward for a in agents]) + 0.5
-            local_maxes = np.logical_and(rewards > 0.2, rewards < 0.4)
+            local_maxes = np.logical_and(rewards > 0.2, rewards < 0.75)
             return np.mean(local_maxes)
         
         def most_common_choice(agents):
@@ -162,18 +163,18 @@ class SocialGPModel(mesa.Model):
                 # "avg_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) / m.steps + 0.5,
                 # Mean/SE reward in last step across agents
                 "mean_reward": lambda m: np.mean([a.last_reward for a in m.grid.agents]) + 0.5,
-                # "se_reward": lambda m: np.std([a.last_reward for a in m.grid.agents]) / np.sqrt(self.num_agents),
-                # "prob_near_peak": lambda m: prob_near_peak(m.grid.agents),
-                # "prob_local_max": lambda m: prob_local_max(m.grid.agents),
+                "se_reward": lambda m: np.std([a.last_reward for a in m.grid.agents]) / np.sqrt(self.num_agents),
+                "prob_near_peak": lambda m: prob_near_peak(m.grid.agents),
+                "prob_local_max": lambda m: prob_local_max(m.grid.agents),
                 # "most_common_choice": lambda m: most_common_choice(m.grid.agents)
             },
             agent_reporters={
-                "policy": lambda a: a.policy_grid,
-                "choice": lambda a: a.last_choice,
-                "reward": lambda a: a.last_reward + 0.5,
-                "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
-                "near_peak": lambda a: dist_to_peak(a) < 1.0,
-                "local_max": lambda a: a.last_reward > 0.2 and a.last_reward < 0.4, 
+                # "policy": lambda a: a.policy_grid,
+                # "choice": lambda a: a.last_choice,
+                # "reward": lambda a: a.last_reward + 0.5,
+                # "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
+                # "near_peak": lambda a: dist_to_peak(a) < 1.0,
+                # "local_max": lambda a: a.last_reward > 0.2 and a.last_reward < 0.4, 
             },
         )
 
