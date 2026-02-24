@@ -136,6 +136,13 @@ class SocialGPAgent(CellAgent):
     @property
     def total_reward(self) -> float:
         return np.sum(self.y_observations)
+    
+    @property
+    def policy_grid(self) -> np.ndarray:
+        grid = np.zeros(self.reward_environment.shape)
+        for coord, prob in zip(self.meshgrid_flatten, self.policy):
+            grid[tuple(coord)] = prob
+        return grid
 
     def _gather_social_info(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
         neighbours = list(self.model.grid[self.cell.coordinate].neighborhood)
