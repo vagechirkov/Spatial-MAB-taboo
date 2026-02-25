@@ -48,9 +48,9 @@ def make_parent_and_children_cholesky(
     
     return _min_max(parent), [_min_max(c) for c in children]
 
-def build_corr_matrix_bare_bones(n_total=4):
+def build_corr_matrix_bare_bones(n_total=4, r=0.6):
     """Example of a simple correlation matrix."""
-    R = np.full((n_total, n_total), 0.6)
+    R = np.full((n_total, n_total), r)
     np.fill_diagonal(R, 1.0)
     return R
 
@@ -336,7 +336,7 @@ def _dog_filter_2d(
         return np.exp(-r2_arr / (2.0 * (s**2)))
 
     g_inner = _gauss(r2, float(sigma_inner))
-    g_outer = _gauss(r2, float(sigma_outer)) * sigma_inner/sigma_outer * 1.5
+    g_outer = _gauss(r2, float(sigma_outer)) * sigma_inner/sigma_outer * 1.5 # Scale outer to have smaller peak amplitude than inner
     dog = g_inner - g_outer
     dog = dog - dog.mean()
     return dog
@@ -459,3 +459,215 @@ def make_mexican_hat_reward(
         sigma_outer=sigma_outer,
         center=center,
     ))
+
+def _cholesky_grid(
+    rng=None,
+    grid_size=20,
+    length_scale=4.0,
+    jitter=1e-10,
+    normalize=True,
+):
+    """
+    Generate a single 2D Gaussian Process grid using an RBF kernel.
+    
+    Parameters
+    ----------
+    rng : np.random.Generator
+    grid_size : int
+        Size of square grid (grid_size x grid_size)
+    length_scale : float
+        RBF kernel length scale
+    jitter : float
+        Small diagonal term for numerical stability
+    normalize : bool
+        If True, apply min-max scaling to [0,1]
+        
+    Returns
+    -------
+    grid : ndarray (grid_size, grid_size)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # Create coordinate grid
+    x, y = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
+    X = np.column_stack([x.ravel(), y.ravel()])
+
+    # sklearn RBF kernel
+    kernel = RBF(length_scale=length_scale)
+
+    # Covariance matrix
+    K = kernel(X)
+
+    # Cholesky decomposition
+    L = np.linalg.cholesky(K + jitter * np.eye(K.shape[0]))
+
+    # Sample from GP prior
+    z = rng.standard_normal(K.shape[0])
+    sample = L @ z
+
+    grid = sample.reshape(grid_size, grid_size)
+
+    if normalize:
+        grid = _min_max(grid)
+
+    return grid
+
+
+def dog_rbf_landscape(
+    grid_size,
+    lambda_inner,
+    lambda_outer,
+    center=None,
+):
+    """
+    Difference-of-RBF landscape (Mexican hat).
+    
+    Parameters
+    ----------
+    grid_size : int
+    lambda_inner : float
+        Inner RBF length scale
+    lambda_outer : float
+        Outer RBF length scale (must be > lambda_inner)
+    center : tuple or None
+    normalize : bool
+    """
+
+    if lambda_outer <= lambda_inner:
+        raise ValueError("lambda_outer must be > lambda_inner")
+
+    if center is None:
+        center = ((grid_size - 1) / 2.0, (grid_size - 1) / 2.0)
+
+    x = np.arange(grid_size)
+    y = np.arange(grid_size)
+    X, Y = np.meshgrid(x, y)
+
+    r2 = (X - center[0])**2 + (Y - center[1])**2
+
+    inner = np.exp(-r2 / (2 * lambda_inner**2))
+    outer = np.exp(-r2 / (2 * lambda_outer**2)) 
+
+    dog = inner - outer * (lambda_inner/lambda_outer)  # Scale outer amplitude according to width
+
+    return dog
+
+
+def make_correlated_dog(
+    rng=None, 
+    grid_size=25, 
+    length_scale=10.0,
+    lambda_inner=None,
+    lambda_outer=None,
+):
+
+    if rng is None:
+        rng = np.random.default_rng()
+    if lambda_inner is None and lambda_outer is None:
+        lambda_outer = length_scale / 2.0
+        lambda_inner = lambda_outer / 2.5
+
+    # Generate correlated landscape
+    gp =_cholesky_grid(rng, grid_size, length_scale=length_scale)
+    # Find coordinates of minimum
+    min_coords = np.unravel_index(np.argmin(gp.T), gp.shape)
+
+    # Create a DoG centered at the minimum
+    dog = dog_rbf_landscape(
+        grid_size=grid_size, 
+        lambda_inner=lambda_inner, 
+        lambda_outer=lambda_outer,
+        center=min_coords
+    )
+    # Scale dog peak to 1.25
+    dog = dog / np.abs(dog).max() * 1.2
+    dog = dog - dog.mean()  # Center around zero mean
+
+    # Sum and rescale to [0, 1]
+    mix = _min_max(gp + dog)
+
+    return mix, gp, dog, min_coords
+
+def make_correlated_dog_from_gp(
+    parent,
+    length_scale=10.0,
+    lambda_inner=None,
+    lambda_outer=None,
+    min_coords=None,
+):
+    grid_size = parent.shape[0]
+    if lambda_inner is None and lambda_outer is None:
+        lambda_outer = length_scale / 2.0
+        lambda_inner = lambda_outer / 2.5
+
+    # Find coordinates of minimum if not provided (e.g. for a parent environment)
+    if min_coords is None:
+        min_coords = np.unravel_index(np.argmin(parent.T), parent.shape)
+
+    # Create a DoG centered at the minimum
+    dog = dog_rbf_landscape(
+        grid_size=grid_size, 
+        lambda_inner=lambda_inner, 
+        lambda_outer=lambda_outer,
+        center=min_coords
+    )
+    # Scale dog peak to 1.25
+    dog = dog / np.abs(dog).max() * 1.2
+    dog = dog - dog.mean()  # Center around zero mean
+
+    # Sum and rescale to [0, 1]
+    mix = _min_max(parent + dog)
+
+    return mix, dog, min_coords
+
+
+def make_parent_and_children_correlated_dog(
+    rng,
+    grid_size=25,
+    n_children=4,
+    length_scale=10.0,
+    target_correlation=0.6,
+    lambda_inner=None,
+    lambda_outer=None,
+    fixed_min_coords=False,
+):
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # Generate correlated landscapes
+    corr_matrix = build_corr_matrix_bare_bones(n_total=n_children + 1, r=target_correlation)
+    parent, children = make_parent_and_children_cholesky(
+        rng,
+        grid_size=grid_size,
+        n_children=n_children,
+        length_scale=length_scale,
+        corr_matrix=corr_matrix,
+    )
+
+    # Add DoG to parent and keep track of minimum coordinates to align children DoG patterns
+    parent_mix, _, min_coords = make_correlated_dog_from_gp(
+        parent,
+        length_scale=length_scale,
+        lambda_inner=lambda_inner,
+        lambda_outer=lambda_outer,
+    )
+
+    if not fixed_min_coords:
+        dog_center = None
+    else:
+        dog_center = min_coords
+
+    # Add DoG to each child, using same min_coords to align patterns
+    children_mix = []
+    for child in children:
+        mix, _, _ = make_correlated_dog_from_gp(
+            child,
+            length_scale=length_scale,
+            lambda_inner=lambda_inner,
+            lambda_outer=lambda_outer,
+            min_coords=dog_center,  # Align children DoG to same minimum location as parent
+        )
+        children_mix.append(mix)
+
+    return parent_mix, children_mix, min_coords

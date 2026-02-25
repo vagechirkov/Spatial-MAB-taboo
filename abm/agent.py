@@ -76,9 +76,11 @@ def value_shaping(
     else:
         value_final = value_ucb_private
 
-    logits = value_final / tau
-    logits = np.clip(logits, -40, 40)
-    return np.exp(logits)
+    # Edited 2026.02.25: Return raw values instead of probabilities for visualization
+    return value_final
+    # logits = value_final / tau
+    # logits = np.clip(logits, -40, 40)
+    # return np.exp(logits)
 
 
 class SocialGPAgent(CellAgent):
@@ -123,6 +125,7 @@ class SocialGPAgent(CellAgent):
         )
         self.meshgrid_flatten = np.array(self.meshgrid, dtype=np.int32).reshape(2, -1).T
         self.meshgrid_dict = {tuple(coord): i for i, coord in enumerate(self.meshgrid_flatten)}
+        self.ucb = np.zeros(len(self.meshgrid_flatten))
         self.policy = np.ones(len(self.meshgrid_flatten)) / len(self.meshgrid_flatten)
 
     @property
@@ -142,6 +145,13 @@ class SocialGPAgent(CellAgent):
         grid = np.zeros(self.reward_environment.shape)
         for coord, prob in zip(self.meshgrid_flatten, self.policy):
             grid[tuple(coord)] = prob
+        return grid
+    
+    @property
+    def ucb_grid(self) -> np.ndarray:
+        grid = np.zeros(self.reward_environment.shape)
+        for coord, ucb in zip(self.meshgrid_flatten, self.ucb):
+            grid[tuple(coord)] = ucb
         return grid
 
     def _gather_social_info(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
@@ -171,7 +181,7 @@ class SocialGPAgent(CellAgent):
         y_priv = np.array(self.y_observations).reshape(-1, 1)
         X_soc, y_soc = self._gather_social_info()
 
-        logits = value_shaping(
+        self.ucb = value_shaping(
             X_priv,
             y_priv,
             X_soc,
@@ -187,6 +197,10 @@ class SocialGPAgent(CellAgent):
             tau=self.tau,
             random_state=self.model.rng.__getstate__(),
         )
+
+        # Edited 2026.02.25
+        logits = self.ucb / self.tau
+        logits = np.exp(np.clip(logits, -40, 40))
 
         probs = logits.ravel()
         probs = np.nan_to_num(probs, nan=1e-12)

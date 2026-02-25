@@ -9,6 +9,25 @@ def plot_reward_grid(grid, figsize=(8, 4)):
     plt.axis('off')
     plt.show()
 
+def plot_reward_grids(reward_array, titles=None):
+    if titles is None:
+        titles = [f"Landscape {i + 1}" for i in range(reward_array.shape[0])]
+
+    n_grids = reward_array.shape[0]
+    fig, axes = plt.subplots(1, n_grids, figsize=(15, 4))
+
+    for i, grid in enumerate(reward_array):
+        axes[i].imshow(grid, cmap='viridis', origin='lower')
+        axes[i].set_title(titles[i])
+
+    for ax in axes:
+        ax.axis('off')
+
+    plt.tight_layout()
+    
+    fig.colorbar(axes[0].images[0], ax=axes, orientation='vertical', fraction=0.02, pad=0.04)
+    return fig, axes
+
 def plot_most_common_choice_trajectory(
     df_batch,
     reward,
@@ -86,3 +105,9 @@ def plot_most_common_choice_trajectory(
 
     plt.show()
     return fig, ax
+
+
+def rbf(grid_size, length_scale, center):
+    x, y = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
+    dists = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+    return np.exp(-0.5 * (dists / length_scale)**2)
