@@ -119,11 +119,8 @@ class SocialGPAgent(CellAgent):
         self.y_observations: list[float] = []
 
         # Prediction grid
-        self.meshgrid = np.meshgrid(
-            range(reward_environment.shape[0]),
-            range(reward_environment.shape[1])
-        )
-        self.meshgrid_flatten = np.array(self.meshgrid, dtype=np.int32).reshape(2, -1).T
+        rows, cols = np.indices(reward_environment.shape, dtype=np.int32)
+        self.meshgrid_flatten = np.column_stack((rows.ravel(), cols.ravel()))
         self.meshgrid_dict = {tuple(coord): i for i, coord in enumerate(self.meshgrid_flatten)}
         self.ucb = np.zeros(len(self.meshgrid_flatten))
         self.policy = np.ones(len(self.meshgrid_flatten)) / len(self.meshgrid_flatten)
