@@ -1,6 +1,3 @@
-from collections import deque
-from collections.abc import Iterable
-
 import mesa
 import networkx as nx
 import numpy as np
@@ -15,90 +12,17 @@ from .rewards import (
     build_corr_matrix_bare_bones,
     make_parent_and_children_correlated_dog,
 )
+from .reporter_helpers import (
+    find_global_peak_coordinates,
+    find_local_peak_coordinates,
+    min_distance_to_points,
+    normalize_reporter_selection,
+)
 
 def _build_network(network_type, n):
     if network_type == "fully_connected":
         return nx.complete_graph(n)
     raise ValueError(f"Unknown network_type '{network_type}'")
-
-
-def _find_local_peak_coordinates(reward_map: np.ndarray) -> list[tuple[int, int]]:
-    """
-    Return coordinates of local maxima in a 2D reward map (8-neighborhood).
-
-    The check uses >= comparisons so flat plateaus are treated as peak regions.
-    """
-    n_rows, n_cols = reward_map.shape
-    padded_map = np.pad(reward_map, 1, mode="constant", constant_values=-np.inf)
-    center = padded_map[1:-1, 1:-1]
-
-    is_local_peak = np.ones_like(reward_map, dtype=bool)
-    for row_shift in (-1, 0, 1):
-        for col_shift in (-1, 0, 1):
-            if row_shift == 0 and col_shift == 0:
-                continue
-            neighbor = padded_map[
-                1 + row_shift : 1 + row_shift + n_rows,
-                1 + col_shift : 1 + col_shift + n_cols,
-            ]
-            is_local_peak &= center >= neighbor
-
-    return [tuple(coord) for coord in np.argwhere(is_local_peak)]
-
-
-def _find_global_peak_coordinates(reward_map: np.ndarray) -> list[tuple[int, int]]:
-    """Return coordinates of global maxima in a 2D reward map."""
-    max_value = np.max(reward_map)
-    is_global_peak = np.isclose(reward_map, max_value)
-    return [tuple(coord) for coord in np.argwhere(is_global_peak)]
-
-
-def _min_distance_to_points(
-    point: tuple[int, int] | None,
-    points: list[tuple[int, int]],
-) -> float:
-    """Return the minimum Euclidean distance from `point` to a set of grid points."""
-    if point is None or len(points) == 0:
-        return np.inf
-
-    point_arr = np.asarray(point, dtype=float)
-    points_arr = np.asarray(points, dtype=float)
-    return float(np.min(np.linalg.norm(points_arr - point_arr, axis=1)))
-
-
-def _normalize_reporter_selection(
-    selection: str | Iterable[str] | None,
-    parameter_name: str,
-) -> list[str] | None:
-    """
-    Normalize reporter selection arguments to a list of reporter names.
-
-    Supports both direct model construction and mesa.batch_run behavior where
-    a single-item list in the parameter grid may arrive as a scalar string.
-    """
-    if selection is None:
-        return None
-
-    if isinstance(selection, str):
-        return [selection]
-
-    selection_list = list(selection)
-
-    # Allow one extra wrapper level (e.g., [["avg_reward", "cumulative_reward"]]).
-    if (
-        len(selection_list) == 1
-        and isinstance(selection_list[0], Iterable)
-        and not isinstance(selection_list[0], str)
-    ):
-        selection_list = list(selection_list[0])
-
-    if not all(isinstance(item, str) for item in selection_list):
-        raise TypeError(
-            f"{parameter_name} must be a string or a sequence of strings. "
-            f"Got: {selection!r}"
-        )
-
-    return selection_list
 
 class SocialGPModel(mesa.Model):
     """
@@ -235,11 +159,11 @@ class SocialGPModel(mesa.Model):
 
         # Local peak locations are static because reward maps are static.
         self.local_peak_coordinates = {
-            agent.unique_id: _find_local_peak_coordinates(agent.reward_environment)
+            agent.unique_id: find_local_peak_coordinates(agent.reward_environment)
             for agent in self.grid.agents
         }
         self.global_peak_coordinates = {
-            agent.unique_id: _find_global_peak_coordinates(agent.reward_environment)
+            agent.unique_id: find_global_peak_coordinates(agent.reward_environment)
             for agent in self.grid.agents
         }
 
@@ -263,7 +187,7 @@ class SocialGPModel(mesa.Model):
                 return max(0.0, dist_to_center - radius)
 
             peak_coords = self.global_peak_coordinates.get(agent.unique_id, [])
-            return _min_distance_to_points(choice, peak_coords)
+            return min_distance_to_points(choice, peak_coords)
 
         def distance_to_global_peak_region(agent):
             """Distance from last choice to the global-peak region boundary."""
@@ -283,7 +207,7 @@ class SocialGPModel(mesa.Model):
         def distance_choice_to_nearest_local_peak(agent, choice):
             """Distance from a choice coordinate to the nearest detected local peak."""
             peak_coords = self.local_peak_coordinates.get(agent.unique_id, [])
-            return _min_distance_to_points(choice, peak_coords)
+            return min_distance_to_points(choice, peak_coords)
 
         def distance_to_nearest_local_peak(agent):
             """Distance from last choice to nearest detected local peak."""
@@ -317,7 +241,7 @@ class SocialGPModel(mesa.Model):
         if model_reporters_to_collect is None:
             model_reporters = dict(available_model_reporters)
         else:
-            requested_model_reporters = _normalize_reporter_selection(
+            requested_model_reporters = normalize_reporter_selection(
                 model_reporters_to_collect,
                 "model_reporters_to_collect",
             )
@@ -343,12 +267,14 @@ class SocialGPModel(mesa.Model):
                 "local_max": lambda a: is_at_local_max(a),
                 "no_max": lambda a: is_not_at_any_max(a),
                 "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
+                "distance_to_global_peak": lambda a: distance_to_global_peak_region(a),
+                "distance_to_local_peak": lambda a: distance_to_nearest_local_peak(a),
             }
 
             if agent_reporters_to_collect is None:
                 requested_agent_reporters = ["reward", "global_max", "local_max", "no_max", "cumulative_reward"]
             else:
-                requested_agent_reporters = _normalize_reporter_selection(
+                requested_agent_reporters = normalize_reporter_selection(
                     agent_reporters_to_collect,
                     "agent_reporters_to_collect",
                 )
