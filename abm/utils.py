@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+from matplotlib.animation import FuncAnimation
 
 def plot_reward_grid(grid, figsize=(8, 4)):
     plt.figure(figsize=figsize)
@@ -38,7 +39,7 @@ def plot_most_common_choice_trajectory(
     title: str = "Most Common Choice Trajectory",
 ):
     """
-    Plot the trajectory of the most common (x, y) choice over time on top of a reward heatmap.
+    Plot the trajectory of the most common (row, col) choice over time on top of a reward heatmap.
 
     Parameters
     ----------
@@ -47,7 +48,7 @@ def plot_most_common_choice_trajectory(
     reward : np.ndarray
         2D reward matrix to display as a heatmap.
     choice_col : str, default "most_common_choice"
-        Name of the DataFrame column containing (x, y) choices.
+        Name of the DataFrame column containing (row, col) choices.
     figsize : tuple, default (6, 6)
         Figure size.
     heatmap_cmap : str, default "viridis"
@@ -67,8 +68,8 @@ def plot_most_common_choice_trajectory(
     if len(most_common_choices) < 2:
         raise ValueError("Need at least two points to plot a trajectory.")
 
-    x_coords = [choice[0] for choice in most_common_choices]
-    y_coords = [choice[1] for choice in most_common_choices]
+    rows = [choice[0] for choice in most_common_choices]
+    cols = [choice[1] for choice in most_common_choices]
 
     # Create figure/axes
     fig, ax = plt.subplots(figsize=figsize)
@@ -77,7 +78,7 @@ def plot_most_common_choice_trajectory(
     ax.imshow(reward, cmap=heatmap_cmap, origin="lower")
 
     # 2) Build line segments from consecutive points
-    points = np.array([x_coords, y_coords]).T.reshape(-1, 1, 2)
+    points = np.array([cols, rows]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
     # 3) Color segments by time step
@@ -91,8 +92,8 @@ def plot_most_common_choice_trajectory(
     ax.add_collection(lc)
 
     # Mark start and end points
-    ax.scatter(x_coords[0], y_coords[0], color="red", label="Start", zorder=5)
-    ax.scatter(x_coords[-1], y_coords[-1], color="blue", label="End", zorder=5)
+    ax.scatter(cols[0], rows[0], color="red", label="Start", zorder=5)
+    ax.scatter(cols[-1], rows[-1], color="blue", label="End", zorder=5)
 
     # Labels and style
     ax.set_title(title)
@@ -108,6 +109,69 @@ def plot_most_common_choice_trajectory(
 
 
 def rbf(grid_size, length_scale, center):
-    x, y = np.meshgrid(np.arange(grid_size), np.arange(grid_size))
-    dists = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+    rows, cols = np.indices((grid_size, grid_size))
+    dists = np.sqrt((rows - center[0])**2 + (cols - center[1])**2)
     return np.exp(-0.5 * (dists / length_scale)**2)
+
+
+def animate_heatmap_trajectory(
+    df,
+    heatmap_col,
+    choice_col='choice',
+    figsize=(4, 4),
+    cmap='viridis',
+    origin='lower',
+    marker_color='red',
+    marker_size=100,
+    edgecolor='white',
+    start_idx=1,
+    fps=4,
+    save_path=None,
+    repeat=False,
+    title_prefix='Step',
+):
+    if heatmap_col not in df.columns:
+        raise KeyError(f"Column '{heatmap_col}' not found in dataframe.")
+    if choice_col not in df.columns:
+        raise KeyError(f"Column '{choice_col}' not found in dataframe.")
+
+    heatmaps = df[heatmap_col].to_numpy()
+    if len(heatmaps) == 0:
+        raise ValueError("Dataframe has no rows to animate.")
+    if not (0 <= start_idx < len(heatmaps)):
+        raise ValueError(f"start_idx must be in [0, {len(heatmaps)-1}], got {start_idx}.")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    vmin = min(h.min() for h in heatmaps)
+    vmax = max(h.max() for h in heatmaps)
+
+    im = ax.imshow(
+        heatmaps[start_idx], cmap=cmap, origin=origin, vmin=vmin, vmax=vmax
+    )
+    row0, col0 = df.iloc[0][choice_col]
+    ax.scatter(col0, row0, color=marker_color, s=marker_size, edgecolor=edgecolor)
+    ax.axis('off')
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    def update(frame):
+        ax.clear()
+        im = ax.imshow(
+            heatmaps[frame], cmap=cmap, origin=origin, vmin=vmin, vmax=vmax
+        )
+        row, col = df.iloc[frame][choice_col]
+        ax.scatter(col, row, color=marker_color, s=marker_size, edgecolor=edgecolor)
+        ax.set_title(f'{title_prefix} {frame}')
+        ax.axis('off')
+        return (im,)
+
+    ani = FuncAnimation(
+        fig,
+        update,
+        frames=range(start_idx, len(heatmaps)),
+        repeat=repeat,
+    )
+
+    if save_path is not None:
+        ani.save(save_path, writer='pillow', fps=fps)
+
+    return ani, fig, ax
