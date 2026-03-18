@@ -259,6 +259,7 @@ def plot_metric_heatmaps_by_lambda(
     summary_df: pd.DataFrame,
     metric_column: str,
     metric_label: str,
+    annot: bool = False,
     fmt: str = ".2f",
     cmap: str = "viridis",
     ncols: int = 2,
@@ -284,7 +285,7 @@ def plot_metric_heatmaps_by_lambda(
 
         sns.heatmap(
             pivot_table,
-            annot=True,
+            annot=annot,
             fmt=fmt,
             cmap=cmap,
             vmin=vmin,
@@ -294,21 +295,21 @@ def plot_metric_heatmaps_by_lambda(
             cbar_kws={"label": cbar_label if cbar_label is not None else metric_label},
         )
 
-        ax.set_title(rf"{metric_label} ($\\lambda$ = {float(lambda_value):.3f})")
-        ax.set_xticklabels(
-            [f"{float(beta):.3f}" for beta in pivot_table.columns],
-            rotation=45,
-            ha="right",
-        )
-        ax.set_yticklabels(
-            [f"{float(tau):.3f}" for tau in pivot_table.index],
-            rotation=0,
-        )
+        ax.set_title(rf"{metric_label} ($\lambda$ = {float(lambda_value):.3f})")
+        # ax.set_xticklabels(
+        #     [f"{float(beta):.3f}" for beta in pivot_table.columns],
+        #     rotation=45,
+        #     ha="right",
+        # )
+        # ax.set_yticklabels(
+        #     [f"{float(tau):.3f}" for tau in pivot_table.index],
+        #     rotation=0,
+        # )
 
         show_x = row_idx == (nrows - 1)
         show_y = col_idx == 0
-        ax.set_xlabel(r"$\\beta$" if show_x else "")
-        ax.set_ylabel(r"$\\tau$" if show_y else "")
+        ax.set_xlabel(r"$\beta$") # if show_x else "")
+        ax.set_ylabel(r"$\tau$") # if show_y else "")
 
     for panel_idx in range(n_panels, len(axes_flat)):
         axes_flat[panel_idx].set_visible(False)
