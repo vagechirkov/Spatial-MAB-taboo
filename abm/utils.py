@@ -129,17 +129,116 @@ def animate_heatmap_trajectory(
     save_path=None,
     repeat=False,
     title_prefix='Step',
+    focal_agent=None,
+    agent_id_col='AgentID',
+    step_col='Step',
+    match_cols=None,
+    other_marker_color='cyan',
+    other_marker_size=70,
+    other_edgecolor='black',
+    other_alpha=0.85,
 ):
+    """
+    Animate a focal agent's heatmap with choice markers over time.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Dataframe with at least heatmap and choice columns.
+    heatmap_col : str
+        Column containing 2D arrays to render each frame.
+    choice_col : str, default 'choice'
+        Column containing (row, col) choices.
+    focal_agent : optional
+        Agent identifier to animate. If provided, choices of all other agents
+        at each matching step are also plotted as dots.
+    agent_id_col : str, default 'AgentID'
+        Agent id column.
+    step_col : str, default 'Step'
+        Step column used to align other agents with the focal frame.
+    match_cols : list[str] | None, default None
+        Extra columns that must match between focal and other-agent rows
+        (for example, RunId/iteration). If None, inferred as available
+        columns among ['RunId', 'iteration'].
+    """
+
+    def _unpack_choice(choice, row_idx):
+        if not hasattr(choice, '__len__') or len(choice) < 2:
+            raise ValueError(
+                f"Invalid choice at row {row_idx}: expected (row, col), got {choice!r}."
+            )
+        return choice[0], choice[1]
+
     if heatmap_col not in df.columns:
         raise KeyError(f"Column '{heatmap_col}' not found in dataframe.")
     if choice_col not in df.columns:
         raise KeyError(f"Column '{choice_col}' not found in dataframe.")
 
-    heatmaps = df[heatmap_col].to_numpy()
+    if focal_agent is not None:
+        if agent_id_col not in df.columns:
+            raise KeyError(
+                f"Column '{agent_id_col}' is required when focal_agent is provided."
+            )
+        if step_col not in df.columns:
+            raise KeyError(
+                f"Column '{step_col}' is required when focal_agent is provided."
+            )
+        focal_df = df[df[agent_id_col] == focal_agent].copy()
+        if focal_df.empty:
+            raise ValueError(
+                f"No rows found for focal_agent={focal_agent!r} in column '{agent_id_col}'."
+            )
+    else:
+        focal_df = df.copy()
+        if (
+            agent_id_col in focal_df.columns
+            and focal_df[agent_id_col].nunique() > 1
+        ):
+            raise ValueError(
+                "Dataframe contains multiple agents. "
+                "Provide focal_agent to choose which agent heatmap to animate."
+            )
+
+    if step_col in focal_df.columns:
+        focal_df = focal_df.sort_values(step_col).reset_index(drop=True)
+    else:
+        focal_df = focal_df.reset_index(drop=True)
+
+    if match_cols is None:
+        match_cols = [col for col in ('RunId', 'iteration') if col in focal_df.columns]
+    else:
+        missing_match_cols = [col for col in match_cols if col not in focal_df.columns]
+        if missing_match_cols:
+            raise KeyError(
+                f"Columns {missing_match_cols} in match_cols were not found in dataframe."
+            )
+
+    heatmaps = focal_df[heatmap_col].to_numpy()
     if len(heatmaps) == 0:
         raise ValueError("Dataframe has no rows to animate.")
     if not (0 <= start_idx < len(heatmaps)):
         raise ValueError(f"start_idx must be in [0, {len(heatmaps)-1}], got {start_idx}.")
+
+    other_choices_by_key = {}
+    if focal_agent is not None:
+        for row_idx, row in df.iterrows():
+            if row[agent_id_col] == focal_agent:
+                continue
+            key = [row[step_col]]
+            for col in match_cols:
+                key.append(row[col])
+            other_choices_by_key.setdefault(tuple(key), []).append(
+                _unpack_choice(row[choice_col], row_idx)
+            )
+
+    def _frame_key(frame_idx):
+        if focal_agent is None:
+            return None
+        row = focal_df.iloc[frame_idx]
+        key = [row[step_col]]
+        for col in match_cols:
+            key.append(row[col])
+        return tuple(key)
 
     fig, ax = plt.subplots(figsize=figsize)
     vmin = min(h.min() for h in heatmaps)
@@ -148,8 +247,41 @@ def animate_heatmap_trajectory(
     im = ax.imshow(
         heatmaps[start_idx], cmap=cmap, origin=origin, vmin=vmin, vmax=vmax
     )
-    row0, col0 = df.iloc[0][choice_col]
-    ax.scatter(col0, row0, color=marker_color, s=marker_size, edgecolor=edgecolor)
+    row0, col0 = _unpack_choice(focal_df.iloc[start_idx][choice_col], start_idx)
+    ax.scatter(
+        col0,
+        row0,
+        color=marker_color,
+        s=marker_size,
+        edgecolor=edgecolor,
+        label='Focal',
+    )
+
+    if focal_agent is not None:
+        other_choices = other_choices_by_key.get(_frame_key(start_idx), [])
+        if other_choices:
+            other_rows, other_cols = zip(*other_choices)
+            ax.scatter(
+                other_cols,
+                other_rows,
+                color=other_marker_color,
+                s=other_marker_size,
+                edgecolor=other_edgecolor,
+                alpha=other_alpha,
+                label='Other agents',
+            )
+        ax.legend(loc='upper right', frameon=True)
+
+    initial_step = (
+        focal_df.iloc[start_idx][step_col]
+        if step_col in focal_df.columns
+        else start_idx
+    )
+    if focal_agent is None:
+        ax.set_title(f'{title_prefix} {initial_step}')
+    else:
+        ax.set_title(f'{title_prefix} {initial_step} | focal {focal_agent}')
+
     ax.axis('off')
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
@@ -158,9 +290,40 @@ def animate_heatmap_trajectory(
         im = ax.imshow(
             heatmaps[frame], cmap=cmap, origin=origin, vmin=vmin, vmax=vmax
         )
-        row, col = df.iloc[frame][choice_col]
-        ax.scatter(col, row, color=marker_color, s=marker_size, edgecolor=edgecolor)
-        ax.set_title(f'{title_prefix} {frame}')
+        row, col = _unpack_choice(focal_df.iloc[frame][choice_col], frame)
+        ax.scatter(
+            col,
+            row,
+            color=marker_color,
+            s=marker_size,
+            edgecolor=edgecolor,
+            label='Focal',
+        )
+
+        if focal_agent is not None:
+            other_choices = other_choices_by_key.get(_frame_key(frame), [])
+            if other_choices:
+                other_rows, other_cols = zip(*other_choices)
+                ax.scatter(
+                    other_cols,
+                    other_rows,
+                    color=other_marker_color,
+                    s=other_marker_size,
+                    edgecolor=other_edgecolor,
+                    alpha=other_alpha,
+                    label='Other agents',
+                )
+            ax.legend(loc='upper right', frameon=True)
+
+        frame_step = (
+            focal_df.iloc[frame][step_col]
+            if step_col in focal_df.columns
+            else frame
+        )
+        if focal_agent is None:
+            ax.set_title(f'{title_prefix} {frame_step}')
+        else:
+            ax.set_title(f'{title_prefix} {frame_step} | focal {focal_agent}')
         ax.axis('off')
         return (im,)
 

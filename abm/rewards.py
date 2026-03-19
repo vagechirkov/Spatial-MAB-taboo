@@ -629,6 +629,24 @@ def make_parent_and_children_correlated_dog(
     if rng is None:
         rng = np.random.default_rng()
 
+    if not (-1 <= target_correlation <= 1):
+        raise ValueError(
+            f"target_correlation must be in [-1, 1], got {target_correlation}"
+        )
+
+    # Perfect correlation implies identical parent/child environments.
+    # Short-circuit to avoid a singular all-ones correlation matrix.
+    if target_correlation == 1.0:
+        parent_mix, _, _, min_coords = make_correlated_dog(
+            rng=rng,
+            grid_size=grid_size,
+            length_scale=length_scale,
+            sigma_inner=sigma_inner,
+            sigma_outer=sigma_outer,
+        )
+        children_mix = [parent_mix.copy() for _ in range(n_children)]
+        return parent_mix, children_mix, min_coords
+
     # Generate correlated landscapes
     corr_matrix = build_corr_matrix_bare_bones(n_total=n_children + 1, r=target_correlation)
     parent, children = make_parent_and_children_cholesky(

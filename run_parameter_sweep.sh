@@ -1,12 +1,14 @@
 #!/bin/bash
 
-#SBATCH --job-name=spatial-mab-sweep
-#SBATCH --output=/scratch/%u/logs/spatial-mab-sweep_%j.log
-#SBATCH --error=/scratch/%u/logs/spatial-mab-sweep_%j.err
+# Use `sbatch --job-name=<name> ... run_parameter_sweep.sh` to override.
+# `%x` expands to the effective Slurm job name.
+#SBATCH --job-name=mab-dyadic-sweep
+#SBATCH --output=/scratch/%u/logs/%x_%j.log
+#SBATCH --error=/scratch/%u/logs/%x_%j.err
 #SBATCH --partition=long
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=2
+#SBATCH --cpus-per-task=32
 #SBATCH --mem=8G
 #SBATCH --array=0-0
 #SBATCH --time=2:00:00
@@ -35,7 +37,7 @@ if [[ ! -d "${PROJECT_DIR}/abm" ]]; then
   echo "PROJECT_DIR must point to repository root containing ./abm" >&2
   echo "Current PROJECT_DIR: ${PROJECT_DIR}" >&2
   echo "Set PROJECT_DIR explicitly when submitting, for example:" >&2
-  echo "sbatch --export=ALL,PROJECT_DIR=/home/${USER}/Spatial-MAB-taboo,OUTPUT_DIR=/scratch/${USER}/parameter_sweeps run_parameter_sweep.sh" >&2
+  echo "sbatch --job-name=mab-my-run --export=ALL,PROJECT_DIR=/home/${USER}/Spatial-MAB-taboo,OUTPUT_DIR=/scratch/${USER}/parameter_sweeps run_parameter_sweep.sh" >&2
   exit 1
 fi
 
@@ -47,7 +49,7 @@ if [[ -f "${VENV_DIR}/bin/activate" ]]; then
   source "${VENV_DIR}/bin/activate"
 fi
 
-# Always prepend project root so `python -m abm.run_parameter_sweep` is importable.
+# Always prepend project root so `python -m <module>` is importable.
 export PYTHONPATH="${PROJECT_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
 # Prevent thread oversubscription when using multiprocessing.
@@ -75,24 +77,28 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   exit 1
 fi
 
-GRID_SIZE=33
-LAMBDA_TRUE=4.5
-TARGET_CORRELATION=0.9
-N_AGENTS=1
-N_RUNS=50
-MAX_STEPS=500
-ALPHA=0.0
+RUNNER_MODULE="${RUNNER_MODULE:-abm.run_slurm_jobs}"
 
-BETA_START=0.65
-BETA_STOP=0.66
-BETA_STEP=0.025
+GRID_SIZE="${GRID_SIZE:-33}"
+LAMBDA_TRUE="${LAMBDA_TRUE:-4.5}"
+TARGET_CORRELATION="${TARGET_CORRELATION:-1.0}"
+N_AGENTS="${N_AGENTS:-2}"
+N_RUNS="${N_RUNS:-100}"
+MAX_STEPS="${MAX_STEPS:-500}"
+ALPHA="${ALPHA:-0.12}"
 
-TAU_OFFSET=0.0
-TAU_START=0.008
-TAU_STOP=0.009
-TAU_STEP=0.02
+BETA_START="${BETA_START:-0.53}"
+BETA_STOP="${BETA_STOP:-0.54}"
+BETA_STEP="${BETA_STEP:-0.025}"
 
-LENGTH_SCALE_MULTIPLIERS="0.5" # 1.0
+TAU_OFFSET="${TAU_OFFSET:-0.0}"
+TAU_START="${TAU_START:-0.02}"
+TAU_STOP="${TAU_STOP:-0.03}"
+TAU_STEP="${TAU_STEP:-0.02}"
+
+LENGTH_SCALE_MULTIPLIERS="${LENGTH_SCALE_MULTIPLIERS:-0.1}" # 1.0
+
+COLLECT_EVERY="${COLLECT_EVERY:-1}"
 
 # Parallelism inside mesa.batch_run.
 # Default to Slurm's CPU allocation if available.
@@ -103,7 +109,12 @@ NUMBER_PROCESSES="${NUMBER_PROCESSES:-${SLURM_CPUS_PER_TASK:-}}"
 NUM_JOBS="${NUM_JOBS:-${SLURM_ARRAY_TASK_COUNT:-1}}"
 JOB_INDEX="${JOB_INDEX:-${SLURM_ARRAY_TASK_ID:-0}}"
 
-OUTPUT_STEM="parameter_sweep_hole1"
+JOB_NAME="${JOB_NAME:-${SLURM_JOB_NAME:-mab-dyadic-sweep}}"
+OUTPUT_STEM_DEFAULT="$(printf '%s' "${JOB_NAME}" | tr '[:space:]/' '__' | tr -cd 'A-Za-z0-9._-')"
+if [[ -z "${OUTPUT_STEM_DEFAULT}" ]]; then
+  OUTPUT_STEM_DEFAULT="parameter_sweep"
+fi
+OUTPUT_STEM="${OUTPUT_STEM:-${OUTPUT_STEM_DEFAULT}}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SLURM_SUBMIT_DIR:-.}}"
 
 if [[ ! "${NUM_JOBS}" =~ ^[0-9]+$ ]] || [[ "${NUM_JOBS}" -lt 1 ]]; then
@@ -116,6 +127,11 @@ if [[ ! "${JOB_INDEX}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+if [[ "${JOB_INDEX}" -ge "${NUM_JOBS}" ]]; then
+  echo "JOB_INDEX must be in [0, NUM_JOBS), got JOB_INDEX=${JOB_INDEX}, NUM_JOBS=${NUM_JOBS}" >&2
+  exit 1
+fi
+
 mkdir -p "${OUTPUT_DIR}"
 
 if [[ "${NUM_JOBS}" -gt 1 ]]; then
@@ -124,12 +140,12 @@ else
   OUTPUT_CSV="${OUTPUT_DIR}/${OUTPUT_STEM}.csv"
 fi
 
-APPEND=0
-DISPLAY_PROGRESS=1
-LOG_EVERY=5
+APPEND="${APPEND:-0}"
+DISPLAY_PROGRESS="${DISPLAY_PROGRESS:-1}"
+LOG_EVERY="${LOG_EVERY:-5}"
 
 cmd=(
-  "${PYTHON_BIN}" -m abm.run_parameter_sweep
+  "${PYTHON_BIN}" -m "${RUNNER_MODULE}"
   --grid-size "${GRID_SIZE}"
   --lambda-true "${LAMBDA_TRUE}"
   --target-correlation "${TARGET_CORRELATION}"
@@ -147,6 +163,7 @@ cmd=(
   --length-scale-multipliers "${LENGTH_SCALE_MULTIPLIERS}"
   --output-csv "${OUTPUT_CSV}"
   --num-jobs "${NUM_JOBS}"
+  --data-collection-period "${COLLECT_EVERY}"
   --job-index "${JOB_INDEX}"
   --log-every "${LOG_EVERY}"
 )
@@ -167,14 +184,17 @@ echo "Running on host: $(hostname)"
 echo "PROJECT_DIR: ${PROJECT_DIR}"
 echo "VENV_DIR: ${VENV_DIR}"
 echo "PYTHON_BIN: ${PYTHON_BIN}"
+echo "RUNNER_MODULE: ${RUNNER_MODULE}"
+echo "JOB_NAME: ${JOB_NAME}"
+echo "OUTPUT_STEM: ${OUTPUT_STEM}"
 echo "SLURM_JOB_ID: ${SLURM_JOB_ID:-none}"
 echo "SLURM_ARRAY_TASK_ID: ${SLURM_ARRAY_TASK_ID:-none}"
 echo "NUM_JOBS=${NUM_JOBS}, JOB_INDEX=${JOB_INDEX}"
 echo "NUMBER_PROCESSES=${NUMBER_PROCESSES:-mesa-default}"
 echo "Output CSV: ${OUTPUT_CSV}"
 
-if ! "${PYTHON_BIN}" -c "import abm" >/dev/null 2>&1; then
-  echo "Python preflight failed: cannot import 'abm' with PYTHON_BIN=${PYTHON_BIN}" >&2
+if ! "${PYTHON_BIN}" -c "import importlib; importlib.import_module('${RUNNER_MODULE}')" >/dev/null 2>&1; then
+  echo "Python preflight failed: cannot import runner module '${RUNNER_MODULE}' with PYTHON_BIN=${PYTHON_BIN}" >&2
   echo "PYTHONPATH=${PYTHONPATH}" >&2
   exit 1
 fi
