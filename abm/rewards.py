@@ -510,6 +510,77 @@ def _cholesky_grid(
     return grid
 
 
+def sinusoid_landscape(
+    grid_size,
+    sigma_inner,
+    sigma_outer,
+    center=None,
+):
+    """
+    Superimposed radial kernel built from cosine profiles revolved around center.
+
+    Definitions in terms of radial distance r from center:
+    - Inner f: f(0) = 1, f(sigma_inner) = 0
+    - Outer g: g(r) = NaN for r < sigma_inner,
+      g(sigma_inner) = 0,
+      g(sigma_inner + sigma_outer) = 0.5
+
+    The returned kernel is f + g, treating NaNs as zero contribution.
+    
+    Parameters
+    ----------
+    grid_size : int
+    sigma_inner : float
+        Inner cosine width (transitions from 1 to 0 over this distance)
+    sigma_outer : float
+        Outer cosine width (transitions from 0 to 0.5 over this distance)
+    center : tuple or None
+        Center coordinates (row, col). If None, uses grid center.
+    """
+    
+    if sigma_outer <= 0:
+        raise ValueError("sigma_outer must be > 0")
+    if sigma_inner <= 0:
+        raise ValueError("sigma_inner must be > 0")
+    
+    if center is None:
+        center = ((grid_size - 1) / 2.0, (grid_size - 1) / 2.0)
+    
+    rows, cols = np.indices((grid_size, grid_size))
+    r = np.sqrt((rows - center[0])**2 + (cols - center[1])**2)
+
+    # Inner cosine profile on [0, sigma_inner]:
+    # f(r) = 0.5 * (1 + cos(2*pi*r/lambda_in + phase_in))
+    # with lambda_in = 2*sigma_inner and phase_in = 0
+    inner_wavelength = 2.0 * sigma_inner
+    inner_phase = 0.0
+    inner = np.full_like(r, np.nan, dtype=float)
+    inner_mask = r <= sigma_inner
+    inner_arg = (2.0 * np.pi * r[inner_mask] / inner_wavelength) + inner_phase
+    inner[inner_mask] =  (0.5 + np.cos(inner_arg)) # 0.5 * (1.0 + np.cos(inner_arg))
+
+    # Outer cosine profile starts at sigma_inner and ramps to 0.5 at
+    # sigma_inner + sigma_outer:
+    # g(r) = 0.25 * (1 + cos(2*pi*(r-sigma_inner)/lambda_out + phase_out))
+    # with lambda_out = 2*sigma_outer and phase_out = pi
+    outer_wavelength = sigma_outer
+    outer_phase = np.pi
+    outer = np.full_like(r, np.nan, dtype=float)
+
+    outer_ramp_mask = (r > sigma_inner) & (r <= sigma_outer + 1)
+    outer_arg = (
+        (2.0 * np.pi * (r[outer_ramp_mask] - sigma_inner) / outer_wavelength)
+        + outer_phase
+    )
+    outer[outer_ramp_mask] = 0.25 * (-1.0 + np.cos(outer_arg)) #0.25 * (1.0 + np.cos(outer_arg))
+    outer[r > sigma_outer + 1] = np.nan
+
+    # Superimpose while treating NaN as "undefined/no contribution".
+    result = np.nan_to_num(inner, nan=0.0) + np.nan_to_num(outer, nan=0.0)
+    
+    return result
+
+
 def dog_rbf_landscape(
     grid_size,
     sigma_inner,
@@ -540,10 +611,10 @@ def dog_rbf_landscape(
 
     r2 = (rows - center[0])**2 + (cols - center[1])**2
 
-    inner = np.exp(-r2 / (2 * sigma_inner**2))
-    outer = np.exp(-r2 / (2 * sigma_outer**2)) 
+    inner = np.exp(-r2 / (2 * sigma_inner**2)) #/ (2 * np.pi * sigma_inner**2)
+    outer = np.exp(-r2 / (2 * sigma_outer**2)) #/ (2 * np.pi * sigma_outer**2)
 
-    dog = inner - outer * (sigma_inner/sigma_outer)  # Scale outer amplitude according to width
+    dog = inner - outer * (sigma_inner/sigma_outer)  # Scale outer amplitude according to width 
 
     return dog
 
@@ -559,8 +630,8 @@ def make_correlated_dog(
     if rng is None:
         rng = np.random.default_rng()
     if sigma_inner is None and sigma_outer is None:
-        sigma_outer = length_scale / 2.0
-        sigma_inner = sigma_outer / 2.5
+        sigma_outer = length_scale 
+        sigma_inner = sigma_outer / 2.0
 
     # Generate correlated landscape
     gp =_cholesky_grid(rng, grid_size, length_scale=length_scale)
@@ -585,7 +656,7 @@ def make_correlated_dog(
 
 def make_correlated_dog_from_gp(
     parent,
-    length_scale=10.0,
+    length_scale=4.0,
     sigma_inner=None,
     sigma_outer=None,
     min_coords=None,
@@ -618,9 +689,9 @@ def make_correlated_dog_from_gp(
 
 def make_parent_and_children_correlated_dog(
     rng,
-    grid_size=25,
-    n_children=4,
-    length_scale=10.0,
+    grid_size=33,
+    n_children=1,
+    length_scale=4.0,
     target_correlation=0.6,
     sigma_inner=None,
     sigma_outer=None,

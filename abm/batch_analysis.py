@@ -266,6 +266,7 @@ def plot_metric_heatmaps_by_lambda(
     vmin: float | None = None,
     vmax: float | None = None,
     cbar_label: str | None = None,
+    mark_max: bool = False,
 ):
     """Plot one heatmap per lambda panel for a given metric."""
     lambda_values = np.sort(summary_df["length_scale"].unique())
@@ -294,6 +295,23 @@ def plot_metric_heatmaps_by_lambda(
             ax=ax,
             cbar_kws={"label": cbar_label if cbar_label is not None else metric_label},
         )
+
+        if mark_max:
+            pivot_values = pivot_table.to_numpy(dtype=float)
+            has_finite_values = np.isfinite(pivot_values).any()
+            if has_finite_values:
+                max_flat_index = np.nanargmax(pivot_values)
+                max_row, max_col = np.unravel_index(max_flat_index, pivot_values.shape)
+                ax.scatter(
+                    max_col + 0.5,
+                    max_row + 0.5,
+                    marker="*",
+                    s=260,
+                    c="crimson",
+                    edgecolors="white",
+                    linewidths=1.0,
+                    zorder=10,
+                )
 
         ax.set_title(rf"{metric_label} ($\lambda$ = {float(lambda_value):.3f})")
         # ax.set_xticklabels(
@@ -324,6 +342,7 @@ def plot_metric_suite_by_lambda(
     metric_specs: list[dict],
     cmap: str = "viridis",
     ncols: int = 2,
+    mark_max: bool = True,
 ):
     """Plot a full heatmap suite (one figure per metric spec)."""
     figures = []
@@ -338,6 +357,7 @@ def plot_metric_suite_by_lambda(
             vmin=metric_spec.get("vmin"),
             vmax=metric_spec.get("vmax"),
             cbar_label=metric_spec.get("cbar_label"),
+            mark_max=mark_max,
         )
         figures.append((fig, axes))
     return figures
