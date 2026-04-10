@@ -2,7 +2,7 @@
 
 # Use `sbatch --job-name=<name> ... run_parameter_sweep.sh` to override.
 # `%x` expands to the effective Slurm job name.
-#SBATCH --job-name=mab-dyadic-sweep
+#SBATCH --job-name=monadic-lambda-sweep
 #SBATCH --output=/scratch/%u/logs/%x_%j.log
 #SBATCH --error=/scratch/%u/logs/%x_%j.err
 #SBATCH --partition=long

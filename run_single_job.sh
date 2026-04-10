@@ -8,7 +8,7 @@
 #   --export=ALL,PROJECT_DIR=/home/${USER}/Spatial-MAB-taboo,OUTPUT_DIR=/scratch/${USER}/dyadic500,BETA=0.53,TAU=0.02,LENGTH_SCALE_MULTIPLIER=0.1 \
 #   run_single_job.sh
 
-#SBATCH --job-name=mab-dyadic-hetero
+#SBATCH --job-name=mab-dyadic-hetero-exploiter-optimal
 #SBATCH --output=/scratch/%u/logs/%x_%j.log
 #SBATCH --error=/scratch/%u/logs/%x_%j.err
 #SBATCH --partition=long
