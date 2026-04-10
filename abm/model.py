@@ -258,7 +258,7 @@ class SocialGPModel(mesa.Model):
 
         # Reporter radii are in grid-distance units.
         self.global_peak_report_radius = 1.0
-        self.local_peak_report_radius  = 3.0
+        self.local_peak_report_radius  = 1.0
 
         # Local peak locations are static because reward maps are static.
         self.local_peak_coordinates = {
@@ -316,21 +316,17 @@ class SocialGPModel(mesa.Model):
             """Distance from last choice to nearest detected local peak."""
             return distance_choice_to_nearest_local_peak(agent, agent.last_choice)
 
-        def is_choice_at_local_max(agent, choice):
-            """1 if a choice is near a local peak and not near the global max."""
-            if is_choice_at_global_max(agent, choice):
-                return 0
-            return int(
-                distance_choice_to_nearest_local_peak(agent, choice) <= self.local_peak_report_radius
-            )
-
         def is_at_local_max(agent):
             """
             1 if the last choice is near a detected local peak.
 
             Global max has priority: if an agent is classified as global, local is forced to 0.
             """
-            return is_choice_at_local_max(agent, agent.last_choice)
+            if is_choice_at_global_max(agent, agent.last_choice):
+                return 0
+            return int(
+                distance_choice_to_nearest_local_peak(agent, agent.last_choice) <= self.local_peak_report_radius
+            )
 
         def is_not_at_any_max(agent):
             """1 if the last choice is not near any global/local peak, else 0."""
