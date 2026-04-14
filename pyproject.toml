@@ -16,6 +16,9 @@ dependencies = [
     "seaborn",
     "scipy",
     "pandas",
+    "gymnasium",
+    "stable-baselines3",
+    "sb3-contrib",
 ]
 
 [project.optional-dependencies]

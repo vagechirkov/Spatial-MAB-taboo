@@ -317,3 +317,7 @@ abm/sbi-logs
 abm/sbi-simulations
 *.csv
 .vscode
+*.png
+mab_logs
+*.zip
+wandb

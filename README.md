@@ -170,3 +170,12 @@ merged.to_csv("parameter_sweep_corr_dog.csv", index=False)
 print(f"Merged {len(paths)} files into parameter_sweep_corr_dog.csv")
 PY
 ```
+
+
+## Train RL agent
+
+```bash
+export PYTHONPATH=$(pwd):$PYTHONPATH
+python train_rl_agent.py
+# CUDA_VISIBLE_DEVICES=0 python train_rl_agent.py
+```
