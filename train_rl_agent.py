@@ -25,7 +25,7 @@ cudnn.benchmark = True
 import wandb
 from wandb.integration.sb3 import WandbCallback
 
-from rl_utils import generate_cholesky_bank, WandbEvalCallback
+from rl_utils import generate_cholesky_bank, generate_mexican_hat_bank, generate_correlated_dog_bank, WandbEvalCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 class BatchedSpatialBanditEnv(VecEnv):
@@ -149,48 +149,69 @@ class BatchedSpatialBanditEnv(VecEnv):
 class CustomCombinedExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 128, use_attention: bool = True):
         super().__init__(observation_space, features_dim=features_dim)
-        
+
         self.use_attention = use_attention
         grid_shape = observation_space.spaces["grid"].shape
-        
+        in_channels = grid_shape[0]
+
         if self.use_attention:
-            seq_len = grid_shape[1] * grid_shape[2]
-            d_model = 64
-            
-            self.pos_embedding = nn.Parameter(torch.randn(1, seq_len, d_model))
-            self.token_proj = nn.Linear(grid_shape[0], d_model)
-            
-            encoder_layer = nn.TransformerEncoderLayer(d_model=d_model, nhead=4, dim_feedforward=128, batch_first=True)
+            stem_channels = 128
+            self.cnn_stem = nn.Sequential(
+                nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(32, stem_channels, kernel_size=3, stride=2, padding=1),
+                nn.ReLU(),
+            )
+            with torch.no_grad():
+                dummy = torch.zeros(1, *grid_shape)
+                stem_out = self.cnn_stem(dummy)
+                _, C_stem, H_stem, W_stem = stem_out.shape
+                seq_len = H_stem * W_stem
+
+            d_model = 128
+            self.token_proj = nn.Linear(C_stem, d_model)
+            self.pos_embedding = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
+
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model, nhead=8, dim_feedforward=256,
+                dropout=0.0, batch_first=True
+            )
             self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-            
+
             n_flatten = d_model
         else:
             self.cnn = nn.Sequential(
-                nn.Conv2d(grid_shape[0], 32, kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
                 nn.ReLU(),
-                nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
                 nn.ReLU(),
-                nn.Flatten()
+                nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
             )
             with torch.no_grad():
                 dummy_grid = torch.zeros(1, *grid_shape)
                 n_flatten = self.cnn(dummy_grid).shape[1]
-            
+
         self.linear = nn.Sequential(
             nn.Linear(n_flatten + 1, features_dim),
-            nn.ReLU()
+            nn.ReLU(),
         )
 
     def forward(self, observations: dict) -> torch.Tensor:
         if self.use_attention:
-            b_size = observations["grid"].shape[0]
-            grid_seq = observations["grid"].view(b_size, 2, -1).permute(0, 2, 1)
+            stem_out = self.cnn_stem(observations["grid"])
+            B, C_stem, H_stem, W_stem = stem_out.shape
+            grid_seq = stem_out.view(B, C_stem, -1).permute(0, 2, 1)
             x = self.token_proj(grid_seq) + self.pos_embedding
             x = self.transformer(x)
             grid_feats = x.mean(dim=1)
         else:
             grid_feats = self.cnn(observations["grid"])
-            
+
         budget_feat = observations["budget"]
         combined = torch.cat([grid_feats, budget_feat], dim=1)
         return self.linear(combined)
@@ -202,13 +223,25 @@ class WandbWriter(KVWriter):
         wandb.log(key_values, step=step)
     def close(self): pass
 
-def run_training_and_eval(use_attention=False):
-    grid_size = 11
+def run_training_and_eval(use_attention=False, environment="correlated_dog", grid_size=11, budgets=None, length_scale=2.0):
+    if budgets is None:
+        budgets = [15]
     
     device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-    
-    train_bank = generate_cholesky_bank(num_envs=10000, grid_size=grid_size, device=device)
-    eval_bank = generate_cholesky_bank(num_envs=300, grid_size=grid_size, device=device)
+
+    VALID_ENVS = {"simple_gp", "mexican_hat", "correlated_dog"}
+    if environment not in VALID_ENVS:
+        raise ValueError(f"environment must be one of {VALID_ENVS}, got {environment!r}")
+
+    if environment == "simple_gp":
+        train_bank = generate_cholesky_bank(num_envs=10000, grid_size=grid_size, length_scale=length_scale, device=device)
+        eval_bank  = generate_cholesky_bank(num_envs=300,   grid_size=grid_size, length_scale=length_scale, device=device)
+    elif environment == "mexican_hat":
+        train_bank = generate_mexican_hat_bank(num_envs=10000, grid_size=grid_size, device=device)
+        eval_bank  = generate_mexican_hat_bank(num_envs=300,   grid_size=grid_size, device=device)
+    elif environment == "correlated_dog":
+        train_bank = generate_correlated_dog_bank(num_envs=1000, grid_size=grid_size, length_scale=length_scale, device=device)
+        eval_bank  = generate_correlated_dog_bank(num_envs=300,   grid_size=grid_size, length_scale=length_scale, device=device)
 
     if device == "cuda":
         n_envs = 256
@@ -216,16 +249,16 @@ def run_training_and_eval(use_attention=False):
         n_envs = min(os.cpu_count() or 4, 64)
 
     n_eval_envs = 256
-    train_env = BatchedSpatialBanditEnv(reward_bank=train_bank, num_envs=n_envs, grid_size=grid_size, device=device)
+    train_env = BatchedSpatialBanditEnv(reward_bank=train_bank, num_envs=n_envs, grid_size=grid_size, budgets=budgets, device=device)
     train_env = VecMonitor(train_env)
     train_env = VecNormalize(train_env, norm_obs=False, norm_reward=True, clip_reward=10.0)
     
-    eval_env = BatchedSpatialBanditEnv(reward_bank=eval_bank, num_envs=n_eval_envs, grid_size=grid_size, device=device)
+    eval_env = BatchedSpatialBanditEnv(reward_bank=eval_bank, num_envs=n_eval_envs, grid_size=grid_size, budgets=budgets, device=device)
     eval_env = VecMonitor(eval_env)
 
     policy_kwargs = dict(
         features_extractor_class=CustomCombinedExtractor,
-        features_extractor_kwargs=dict(features_dim=32, use_attention=use_attention),
+        features_extractor_kwargs=dict(features_dim=128, use_attention=use_attention),
         net_arch=dict(pi=[64, 64], vf=[64, 64])
     )
     
@@ -253,6 +286,22 @@ def run_training_and_eval(use_attention=False):
         sync_tensorboard=False,
         monitor_gym=False,
         save_code=True,
+        config={
+            "environment": environment,
+            "use_attention": use_attention,
+            "grid_size": grid_size,
+            "length_scale": length_scale,
+            "budgets": budgets,
+            "n_envs": n_envs,
+            "n_eval_envs": n_eval_envs,
+            "total_timesteps": 45_000_000,
+            "learning_rate": 1e-4,
+            "ent_coef": 0.005,
+            "n_steps": 128,
+            "batch_size": 1024,
+            "n_epochs": 10,
+            "features_dim": 128,
+        },
     )
     
     log_dir = "./mab_logs"
@@ -270,10 +319,53 @@ def run_training_and_eval(use_attention=False):
     periodic_eval_callback = WandbEvalCallback(eval_env=eval_env, eval_freq=500_000 // n_envs)
     model.learn(total_timesteps=15_000_000, progress_bar=True, callback=[wandb_callback, periodic_eval_callback])
 
+    model_path = f"models/{run.id}/final_model"
     model.save(model_path)
     wandb.save(model_path + ".zip")
     wandb.finish()
 
 
 if __name__ == "__main__":
-    run_training_and_eval()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train RL agent on Spatial MAB")
+    parser.add_argument(
+        "--environment",
+        type=str,
+        default="correlated_dog",
+        choices=["simple_gp", "mexican_hat", "correlated_dog"],
+        help="Reward landscape type (default: simple_gp)",
+    )
+    parser.add_argument(
+        "--grid_size",
+        type=int,
+        default=33,
+        help="Square grid side length (default: 11)",
+    )
+    parser.add_argument(
+        "--use_attention",
+        action="store_true",
+        default=False,
+        help="Use Transformer-based feature extractor",
+    )
+    parser.add_argument(
+        "--budgets",
+        type=int,
+        nargs="+",
+        default=[15],
+        help="Time budget(s) per episode; multiple values are sampled uniformly each reset (default: 15)",
+    )
+    parser.add_argument(
+        "--length_scale",
+        type=float,
+        default=2.0,
+        help="RBF kernel length scale for GP / correlated-DoG environments (default: 2.0)",
+    )
+    args = parser.parse_args()
+    run_training_and_eval(
+        use_attention=args.use_attention,
+        environment=args.environment,
+        grid_size=args.grid_size,
+        budgets=args.budgets,
+        length_scale=args.length_scale,
+    )

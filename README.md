@@ -177,5 +177,9 @@ PY
 ```bash
 export PYTHONPATH=$(pwd):$PYTHONPATH
 python train_rl_agent.py
-# CUDA_VISIBLE_DEVICES=0 python train_rl_agent.py
+# CUDA_VISIBLE_DEVICES=1 python train_rl_agent.py
+# watch -n 1 nvidia-smi
+CUDA_VISIBLE_DEVICES=0 python train_rl_agent.py --environment simple_gp --budgets 50 --length_scale 4.0
+CUDA_VISIBLE_DEVICES=1 python train_rl_agent.py --environment correlated_dog --budgets 15 --length_scale 4.0
+CUDA_VISIBLE_DEVICES=2 python train_rl_agent.py --environment correlated_dog --budgets 100 --length_scale 4.0
 ```

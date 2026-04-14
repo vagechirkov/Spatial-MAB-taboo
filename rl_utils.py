@@ -1,11 +1,14 @@
 import os
+import math
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import wandb
+from concurrent.futures import ProcessPoolExecutor
 
 from stable_baselines3.common.callbacks import BaseCallback
+
 
 def generate_cholesky_bank(num_envs, grid_size=11, length_scale=2.0, device='cuda'):
     print(f"Generating memory bank of {num_envs} GP maps on {device}...")
@@ -24,6 +27,120 @@ def generate_cholesky_bank(num_envs, grid_size=11, length_scale=2.0, device='cud
     maxs = grids.view(num_envs, -1).max(dim=1)[0].view(-1, 1, 1)
     
     grids = (grids - mins) / (maxs - mins + 1e-8)
+    return grids
+
+
+def generate_mexican_hat_bank(
+    num_envs,
+    grid_size=11,
+    frequency=2.0,
+    sigma_inner=None,
+    sigma_outer=None,
+    center_margin=2,
+    sigma_jitter=0.20,
+    seed=None,
+    device='cuda',
+):
+    print(f"Generating memory bank of {num_envs} Mexican-hat maps on {device}...")
+
+    from abm.rewards import _dog_filter_2d, _min_max
+
+    rng = np.random.default_rng(seed)
+
+    if sigma_inner is None:
+        wavelength = grid_size / frequency
+        base_sigma_inner = wavelength / 4.0
+    else:
+        base_sigma_inner = float(sigma_inner)
+    if sigma_outer is None:
+        base_sigma_outer = 2.0 * base_sigma_inner
+    else:
+        base_sigma_outer = float(sigma_outer)
+
+    lo = center_margin
+    hi = grid_size - 1 - center_margin
+
+    maps = []
+    for _ in range(num_envs):
+        # Random center inside the grid interior
+        row = rng.uniform(lo, hi)
+        col = rng.uniform(lo, hi)
+
+        si = base_sigma_inner * np.exp(rng.normal(0.0, sigma_jitter))
+        so = base_sigma_outer * np.exp(rng.normal(0.0, sigma_jitter))
+        so = max(so, si * 1.05)
+
+        dog = _dog_filter_2d(
+            grid_size=grid_size,
+            frequency=frequency,
+            sigma_inner=si,
+            sigma_outer=so,
+            center=(row, col),
+        )
+        maps.append(_min_max(dog).astype(np.float32))
+
+    grids = torch.tensor(np.stack(maps, axis=0), dtype=torch.float32, device=device)
+    return grids
+
+
+def _generate_dog_chunk(args):
+    chunk_size, grid_size, length_scale, sigma_inner, sigma_outer, child_seed = args
+
+    from abm.rewards import make_correlated_dog
+
+    rng = np.random.default_rng(child_seed)
+    maps = []
+    for _ in range(chunk_size):
+        mix, _, _, _ = make_correlated_dog(
+            rng=rng,
+            grid_size=grid_size,
+            length_scale=length_scale,
+            sigma_inner=sigma_inner,
+            sigma_outer=sigma_outer,
+        )
+        maps.append(mix.astype(np.float32))
+    return np.stack(maps, axis=0)
+
+
+def generate_correlated_dog_bank(
+    num_envs,
+    grid_size=33,
+    length_scale=10.0,
+    sigma_inner=None,
+    sigma_outer=None,
+    seed=None,
+    n_workers=None,
+    device='cuda',
+):
+    if n_workers is None:
+        n_workers = os.cpu_count() or 4
+
+    print(
+        f"Generating memory bank of {num_envs} correlated-DoG maps "
+        f"on {device} using {n_workers} workers..."
+    )
+
+    ss = np.random.SeedSequence(seed)
+    child_seeds = ss.spawn(n_workers)
+
+    chunk_size_base = num_envs // n_workers
+    remainders = num_envs % n_workers
+    chunks = [
+        chunk_size_base + (1 if i < remainders else 0)
+        for i in range(n_workers)
+    ]
+
+    worker_args = [
+        (chunk, grid_size, length_scale, sigma_inner, sigma_outer, child_seeds[i])
+        for i, chunk in enumerate(chunks)
+        if chunk > 0
+    ]
+
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        results = list(pool.map(_generate_dog_chunk, worker_args))
+
+    all_maps = np.concatenate(results, axis=0)  # (num_envs, grid_size, grid_size)
+    grids = torch.tensor(all_maps, dtype=torch.float32, device=device)
     return grids
 
 class WandbEvalCallback(BaseCallback):
