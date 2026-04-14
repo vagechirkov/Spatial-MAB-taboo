@@ -13,13 +13,13 @@ from stable_baselines3.common.callbacks import BaseCallback
 def generate_cholesky_bank(num_envs, grid_size=11, length_scale=2.0, device='cuda'):
     print(f"Generating memory bank of {num_envs} GP maps on {device}...")
     x, y = torch.meshgrid(torch.arange(grid_size, device=device), torch.arange(grid_size, device=device), indexing='xy')
-    X = torch.stack([x.ravel(), y.ravel()], dim=1).float()
+    X = torch.stack([x.ravel(), y.ravel()], dim=1).double()
     dist_sq = torch.cdist(X, X, p=2.0) ** 2
     K = torch.exp(-dist_sq / (2.0 * length_scale ** 2))
 
     jitter = 1e-6
     L = torch.linalg.cholesky(K + jitter * torch.eye(K.size(0), device=device))
-    z = torch.randn(num_envs, K.size(0), 1, device=device)
+    z = torch.randn(num_envs, K.size(0), 1, dtype=torch.float64, device=device)
     samples = torch.matmul(L, z).squeeze(-1)
     
     grids = samples.view(num_envs, grid_size, grid_size)
@@ -27,7 +27,7 @@ def generate_cholesky_bank(num_envs, grid_size=11, length_scale=2.0, device='cud
     maxs = grids.view(num_envs, -1).max(dim=1)[0].view(-1, 1, 1)
     
     grids = (grids - mins) / (maxs - mins + 1e-8)
-    return grids
+    return grids.float()
 
 
 def generate_mexican_hat_bank(

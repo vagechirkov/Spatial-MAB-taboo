@@ -223,7 +223,7 @@ class WandbWriter(KVWriter):
         wandb.log(key_values, step=step)
     def close(self): pass
 
-def run_training_and_eval(use_attention=False, environment="correlated_dog", grid_size=11, budgets=None, length_scale=2.0):
+def run_training_and_eval(use_attention=False, environment="correlated_dog", grid_size=11, budgets=None, length_scale=2.0, total_timesteps=15_000_000):
     if budgets is None:
         budgets = [15]
     
@@ -294,7 +294,7 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
             "budgets": budgets,
             "n_envs": n_envs,
             "n_eval_envs": n_eval_envs,
-            "total_timesteps": 45_000_000,
+            "total_timesteps": total_timesteps,
             "learning_rate": 1e-4,
             "ent_coef": 0.005,
             "n_steps": 128,
@@ -317,7 +317,7 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
         verbose=2,
     )
     periodic_eval_callback = WandbEvalCallback(eval_env=eval_env, eval_freq=500_000 // n_envs)
-    model.learn(total_timesteps=15_000_000, progress_bar=True, callback=[wandb_callback, periodic_eval_callback])
+    model.learn(total_timesteps=total_timesteps, progress_bar=True, callback=[wandb_callback, periodic_eval_callback])
 
     model_path = f"models/{run.id}/final_model"
     model.save(model_path)
@@ -361,6 +361,12 @@ if __name__ == "__main__":
         default=2.0,
         help="RBF kernel length scale for GP / correlated-DoG environments (default: 2.0)",
     )
+    parser.add_argument(
+        "--total_timesteps",
+        type=int,
+        default=100_000_000,
+        help="Total environment steps for PPO training (default: 100_000_000)",
+    )
     args = parser.parse_args()
     run_training_and_eval(
         use_attention=args.use_attention,
@@ -368,4 +374,5 @@ if __name__ == "__main__":
         grid_size=args.grid_size,
         budgets=args.budgets,
         length_scale=args.length_scale,
+        total_timesteps=args.total_timesteps,
     )
