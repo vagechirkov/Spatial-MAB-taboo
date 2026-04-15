@@ -25,7 +25,7 @@ cudnn.benchmark = True
 import wandb
 from wandb.integration.sb3 import WandbCallback
 
-from rl_utils import generate_cholesky_bank, generate_mexican_hat_bank, generate_correlated_dog_bank, WandbEvalCallback
+from rl_utils import generate_cholesky_bank, generate_mexican_hat_bank, generate_correlated_dog_bank, WandbEvalCallback, RegenerateEnvBankCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 class BatchedSpatialBanditEnv(VecEnv):
@@ -223,7 +223,7 @@ class WandbWriter(KVWriter):
         wandb.log(key_values, step=step)
     def close(self): pass
 
-def run_training_and_eval(use_attention=False, environment="correlated_dog", grid_size=11, budgets=None, length_scale=2.0, total_timesteps=15_000_000):
+def run_training_and_eval(use_attention=False, environment="correlated_dog", grid_size=11, budgets=None, length_scale=2.0, dog_max=1.2, total_timesteps=15_000_000):
     if budgets is None:
         budgets = [15]
     
@@ -233,15 +233,16 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
     if environment not in VALID_ENVS:
         raise ValueError(f"environment must be one of {VALID_ENVS}, got {environment!r}")
 
+    train_bank_size = 5000
     if environment == "simple_gp":
-        train_bank = generate_cholesky_bank(num_envs=10000, grid_size=grid_size, length_scale=length_scale, device=device)
+        train_bank = generate_cholesky_bank(num_envs=train_bank_size, grid_size=grid_size, length_scale=length_scale, device=device)
         eval_bank  = generate_cholesky_bank(num_envs=300,   grid_size=grid_size, length_scale=length_scale, device=device)
     elif environment == "mexican_hat":
-        train_bank = generate_mexican_hat_bank(num_envs=10000, grid_size=grid_size, device=device)
+        train_bank = generate_mexican_hat_bank(num_envs=train_bank_size, grid_size=grid_size, device=device)
         eval_bank  = generate_mexican_hat_bank(num_envs=300,   grid_size=grid_size, device=device)
     elif environment == "correlated_dog":
-        train_bank = generate_correlated_dog_bank(num_envs=1000, grid_size=grid_size, length_scale=length_scale, device=device)
-        eval_bank  = generate_correlated_dog_bank(num_envs=300,   grid_size=grid_size, length_scale=length_scale, device=device)
+        train_bank = generate_correlated_dog_bank(num_envs=train_bank_size, grid_size=grid_size, length_scale=length_scale, dog_max=dog_max, device=device)
+        eval_bank  = generate_correlated_dog_bank(num_envs=300,   grid_size=grid_size, length_scale=length_scale, dog_max=dog_max, device=device)
 
     if device == "cuda":
         n_envs = 256
@@ -252,7 +253,17 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
     train_env = BatchedSpatialBanditEnv(reward_bank=train_bank, num_envs=n_envs, grid_size=grid_size, budgets=budgets, device=device)
     train_env = VecMonitor(train_env)
     train_env = VecNormalize(train_env, norm_obs=False, norm_reward=True, clip_reward=10.0)
-    
+
+    if environment == "simple_gp":
+        def make_train_bank():
+            return generate_cholesky_bank(num_envs=train_bank_size, grid_size=grid_size, length_scale=length_scale, device=device)
+    elif environment == "mexican_hat":
+        def make_train_bank():
+            return generate_mexican_hat_bank(num_envs=train_bank_size, grid_size=grid_size, device=device)
+    elif environment == "correlated_dog":
+        def make_train_bank():
+            return generate_correlated_dog_bank(num_envs=train_bank_size, grid_size=grid_size, length_scale=length_scale, dog_max=dog_max, device=device)
+
     eval_env = BatchedSpatialBanditEnv(reward_bank=eval_bank, num_envs=n_eval_envs, grid_size=grid_size, budgets=budgets, device=device)
     eval_env = VecMonitor(eval_env)
 
@@ -291,6 +302,7 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
             "use_attention": use_attention,
             "grid_size": grid_size,
             "length_scale": length_scale,
+            "dog_max": dog_max,
             "budgets": budgets,
             "n_envs": n_envs,
             "n_eval_envs": n_eval_envs,
@@ -316,8 +328,14 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
         model_save_path=f"models/{run.id}",
         verbose=2,
     )
+    regen_callback = RegenerateEnvBankCallback(
+        train_env=train_env,
+        generator_fn=make_train_bank,
+        regen_freq=250_000,
+        verbose=1,
+    )
     periodic_eval_callback = WandbEvalCallback(eval_env=eval_env, eval_freq=500_000 // n_envs)
-    model.learn(total_timesteps=total_timesteps, progress_bar=True, callback=[wandb_callback, periodic_eval_callback])
+    model.learn(total_timesteps=total_timesteps, progress_bar=True, callback=[wandb_callback, periodic_eval_callback, regen_callback])
 
     model_path = f"models/{run.id}/final_model"
     model.save(model_path)
@@ -362,6 +380,12 @@ if __name__ == "__main__":
         help="RBF kernel length scale for GP / correlated-DoG environments (default: 2.0)",
     )
     parser.add_argument(
+        "--dog_max",
+        type=float,
+        default=1.2,
+        help="Scale factor for the DoG peak in correlated-DoG landscapes (default: 1.2)",
+    )
+    parser.add_argument(
         "--total_timesteps",
         type=int,
         default=100_000_000,
@@ -374,5 +398,6 @@ if __name__ == "__main__":
         grid_size=args.grid_size,
         budgets=args.budgets,
         length_scale=args.length_scale,
+        dog_max=args.dog_max,
         total_timesteps=args.total_timesteps,
     )

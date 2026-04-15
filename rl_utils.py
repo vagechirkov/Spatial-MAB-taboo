@@ -8,6 +8,7 @@ import wandb
 from concurrent.futures import ProcessPoolExecutor
 
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import VecEnv
 
 
 def generate_cholesky_bank(num_envs, grid_size=11, length_scale=2.0, device='cuda'):
@@ -41,65 +42,64 @@ def generate_mexican_hat_bank(
     seed=None,
     device='cuda',
 ):
+    if seed is not None:
+        torch.manual_seed(seed)
+        
     print(f"Generating memory bank of {num_envs} Mexican-hat maps on {device}...")
-
-    from abm.rewards import _dog_filter_2d, _min_max
-
-    rng = np.random.default_rng(seed)
 
     if sigma_inner is None:
         wavelength = grid_size / frequency
         base_sigma_inner = wavelength / 4.0
     else:
         base_sigma_inner = float(sigma_inner)
+    
     if sigma_outer is None:
         base_sigma_outer = 2.0 * base_sigma_inner
     else:
         base_sigma_outer = float(sigma_outer)
 
-    lo = center_margin
-    hi = grid_size - 1 - center_margin
+    lo = float(center_margin)
+    hi = float(grid_size - 1 - center_margin)
 
-    maps = []
-    for _ in range(num_envs):
-        # Random center inside the grid interior
-        row = rng.uniform(lo, hi)
-        col = rng.uniform(lo, hi)
+    # Random centers per environment
+    centers = torch.rand(num_envs, 2, device=device) * (hi - lo) + lo
+    rows_c = centers[:, 0].view(num_envs, 1, 1)
+    cols_c = centers[:, 1].view(num_envs, 1, 1)
 
-        si = base_sigma_inner * np.exp(rng.normal(0.0, sigma_jitter))
-        so = base_sigma_outer * np.exp(rng.normal(0.0, sigma_jitter))
-        so = max(so, si * 1.05)
+    # Random sigmas with log-normal jitter
+    si_jitter = torch.exp(torch.randn(num_envs, device=device) * sigma_jitter)
+    so_jitter = torch.exp(torch.randn(num_envs, device=device) * sigma_jitter)
+    
+    si = base_sigma_inner * si_jitter
+    so = base_sigma_outer * so_jitter
+    so = torch.max(so, si * 1.05)
+    
+    si = si.view(num_envs, 1, 1)
+    so = so.view(num_envs, 1, 1)
 
-        dog = _dog_filter_2d(
-            grid_size=grid_size,
-            frequency=frequency,
-            sigma_inner=si,
-            sigma_outer=so,
-            center=(row, col),
-        )
-        maps.append(_min_max(dog).astype(np.float32))
+    # Grid coordinates
+    rows_g, cols_g = torch.meshgrid(
+        torch.arange(grid_size, device=device, dtype=torch.float32), 
+        torch.arange(grid_size, device=device, dtype=torch.float32), 
+        indexing='ij'
+    )
+    rows_g = rows_g.unsqueeze(0)
+    cols_g = cols_g.unsqueeze(0)
 
-    grids = torch.tensor(np.stack(maps, axis=0), dtype=torch.float32, device=device)
-    return grids
+    r2 = (rows_g - rows_c)**2 + (cols_g - cols_c)**2
 
-
-def _generate_dog_chunk(args):
-    chunk_size, grid_size, length_scale, sigma_inner, sigma_outer, child_seed = args
-
-    from abm.rewards import make_correlated_dog
-
-    rng = np.random.default_rng(child_seed)
-    maps = []
-    for _ in range(chunk_size):
-        mix, _, _, _ = make_correlated_dog(
-            rng=rng,
-            grid_size=grid_size,
-            length_scale=length_scale,
-            sigma_inner=sigma_inner,
-            sigma_outer=sigma_outer,
-        )
-        maps.append(mix.astype(np.float32))
-    return np.stack(maps, axis=0)
+    # DoG formula matching abm.rewards._dog_filter_2d
+    g_inner = torch.exp(-r2 / (2.0 * si**2))
+    g_outer = torch.exp(-r2 / (2.0 * so**2)) * (si / so) * 1.5
+    dog = g_inner - g_outer
+    
+    # Normalize per map to [0, 1]
+    dog_flat = dog.view(num_envs, -1)
+    d_min = dog_flat.min(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    d_max = dog_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    grids = (dog - d_min) / (d_max - d_min + 1e-8)
+    
+    return grids.float()
 
 
 def generate_correlated_dog_bank(
@@ -108,40 +108,101 @@ def generate_correlated_dog_bank(
     length_scale=10.0,
     sigma_inner=None,
     sigma_outer=None,
+    dog_max=1.2,
     seed=None,
     n_workers=None,
     device='cuda',
 ):
-    if n_workers is None:
-        n_workers = os.cpu_count() or 4
+    print(f"Generating memory bank of {num_envs} correlated-DoG maps on {device} (Torch-vectorized)...")
+    if seed is not None:
+        torch.manual_seed(seed)
 
-    print(
-        f"Generating memory bank of {num_envs} correlated-DoG maps "
-        f"on {device} using {n_workers} workers..."
+    # 1. GP part: generate GP samples on double precision for stability
+    x, y = torch.meshgrid(
+        torch.arange(grid_size, device=device, dtype=torch.float64), 
+        torch.arange(grid_size, device=device, dtype=torch.float64), 
+        indexing='xy'
     )
+    coords = torch.stack([x.ravel(), y.ravel()], dim=1)
+    dist_sq = torch.cdist(coords, coords, p=2.0) ** 2
+    K = torch.exp(-dist_sq / (2.0 * length_scale ** 2))
+    jitter = 1e-6
+    L = torch.linalg.cholesky(K + jitter * torch.eye(K.size(0), device=device, dtype=torch.float64))
+    z = torch.randn(num_envs, K.size(0), 1, dtype=torch.float64, device=device)
+    gp_samples = torch.matmul(L, z).squeeze(-1).view(num_envs, grid_size, grid_size)
+    
+    # 2. Find min indices for each map
+    min_indices = torch.argmin(gp_samples.view(num_envs, -1), dim=1)
 
-    ss = np.random.SeedSequence(seed)
-    child_seeds = ss.spawn(n_workers)
+    gp_flat = gp_samples.view(num_envs, -1)
+    gp_min = gp_flat.min(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    gp_max_val = gp_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    gp_samples = (gp_samples - gp_min) / (gp_max_val - gp_min + 1e-8)
 
-    chunk_size_base = num_envs // n_workers
-    remainders = num_envs % n_workers
-    chunks = [
-        chunk_size_base + (1 if i < remainders else 0)
-        for i in range(n_workers)
-    ]
+    rows_min = (min_indices // grid_size).view(num_envs, 1, 1).float()
+    cols_min = (min_indices % grid_size).view(num_envs, 1, 1).float()
 
-    worker_args = [
-        (chunk, grid_size, length_scale, sigma_inner, sigma_outer, child_seeds[i])
-        for i, chunk in enumerate(chunks)
-        if chunk > 0
-    ]
+    # 3. DoG part
+    if sigma_inner is None and sigma_outer is None:
+        sigma_outer = length_scale
+        sigma_inner = sigma_outer / 2.0
+    
+    # Grid coordinates for DoG (ij indexing works for distance)
+    rows_g, cols_g = torch.meshgrid(
+        torch.arange(grid_size, device=device, dtype=torch.float32), 
+        torch.arange(grid_size, device=device, dtype=torch.float32), 
+        indexing='ij'
+    )
+    rows_g = rows_g.unsqueeze(0)
+    cols_g = cols_g.unsqueeze(0)
+    r2 = (rows_g - rows_min)**2 + (cols_g - cols_min)**2
+    
+    # Matching dog_rbf_landscape from abm.rewards
+    dog_inner = torch.exp(-r2 / (2.0 * float(sigma_inner)**2))
+    dog_outer = torch.exp(-r2 / (2.0 * float(sigma_outer)**2)) * (float(sigma_inner) / float(sigma_outer))
+    dog = dog_inner - dog_outer
+    
+    # Scale dog peak to dog_max and center mean
+    dog_flat = dog.view(num_envs, -1)
+    current_dog_max = torch.abs(dog_flat).max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    dog = dog / (current_dog_max + 1e-8) * dog_max
+    dog = dog - dog.view(num_envs, -1).mean(dim=1).view(num_envs, 1, 1)
 
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
-        results = list(pool.map(_generate_dog_chunk, worker_args))
+    # 4. Result = GP + DoG, then normalize to [0, 1]
+    combined = gp_samples.float() + dog
+    c_flat = combined.view(num_envs, -1)
+    c_min = c_flat.min(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    c_max = c_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    grids = (combined - c_min) / (c_max - c_min + 1e-8)
+    
+    return grids.float()
 
-    all_maps = np.concatenate(results, axis=0)  # (num_envs, grid_size, grid_size)
-    grids = torch.tensor(all_maps, dtype=torch.float32, device=device)
-    return grids
+class RegenerateEnvBankCallback(BaseCallback):
+    def __init__(self, train_env: VecEnv, generator_fn, regen_freq: int = 1_000_000, verbose: int = 1):
+        super().__init__(verbose)
+        self.train_env = train_env
+        self.generator_fn = generator_fn
+        self.regen_freq = regen_freq
+        self._last_regen = 0
+
+    @staticmethod
+    def _unwrap(env):
+        while hasattr(env, 'venv'):
+            env = env.venv
+        return env
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_regen >= self.regen_freq:
+            if self.verbose >= 1:
+                print(f"[RegenerateEnvBankCallback] Regenerating reward bank at {self.num_timesteps:,} timesteps...")
+            new_bank = self.generator_fn()
+            raw_env = self._unwrap(self.train_env)
+            raw_env.reward_bank = new_bank
+            self._last_regen = self.num_timesteps
+            if self.verbose >= 1:
+                print(f"[RegenerateEnvBankCallback] New bank shape: {new_bank.shape}")
+        return True
+
 
 class WandbEvalCallback(BaseCallback):
     def __init__(self, eval_env, eval_freq: int, verbose=0):
