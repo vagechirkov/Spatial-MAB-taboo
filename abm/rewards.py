@@ -625,6 +625,7 @@ def make_correlated_dog(
     length_scale=10.0,
     sigma_inner=None,
     sigma_outer=None,
+    dog_max=1.2,
 ):
 
     if rng is None:
@@ -645,8 +646,8 @@ def make_correlated_dog(
         sigma_outer=sigma_outer,
         center=min_coords
     )
-    # Scale dog peak to 1.25
-    dog = dog / np.abs(dog).max() * 1.2
+    # Scale dog peak to dog_max
+    dog = dog / np.abs(dog).max() * dog_max
     dog = dog - dog.mean()  # Center around zero mean
 
     # Sum and rescale to [0, 1]
@@ -660,6 +661,7 @@ def make_correlated_dog_from_gp(
     sigma_inner=None,
     sigma_outer=None,
     min_coords=None,
+    dog_max=1.2,
 ):
     grid_size = parent.shape[0]
     if sigma_inner is None and sigma_outer is None:
@@ -677,8 +679,8 @@ def make_correlated_dog_from_gp(
         sigma_outer=sigma_outer,
         center=min_coords
     )
-    # Scale dog peak to 1.25
-    dog = dog / np.abs(dog).max() * 1.2
+    # Scale dog peak to dog_max
+    dog = dog / np.abs(dog).max() * dog_max
     dog = dog - dog.mean()  # Center around zero mean
 
     # Sum and rescale to [0, 1]
@@ -696,6 +698,7 @@ def make_parent_and_children_correlated_dog(
     sigma_inner=None,
     sigma_outer=None,
     fixed_min_coords=False,
+    dog_max=1.2,
 ):
     if rng is None:
         rng = np.random.default_rng()
@@ -714,6 +717,7 @@ def make_parent_and_children_correlated_dog(
             length_scale=length_scale,
             sigma_inner=sigma_inner,
             sigma_outer=sigma_outer,
+            dog_max=dog_max,
         )
         children_mix = [parent_mix.copy() for _ in range(n_children)]
         return parent_mix, children_mix, min_coords
@@ -734,6 +738,7 @@ def make_parent_and_children_correlated_dog(
         length_scale=length_scale,
         sigma_inner=sigma_inner,
         sigma_outer=sigma_outer,
+        dog_max=dog_max,
     )
 
     if not fixed_min_coords:
@@ -750,6 +755,7 @@ def make_parent_and_children_correlated_dog(
             sigma_inner=sigma_inner,
             sigma_outer=sigma_outer,
             min_coords=dog_center,  # Align children DoG to same minimum location as parent
+            dog_max=dog_max,
         )
         children_mix.append(mix)
 
