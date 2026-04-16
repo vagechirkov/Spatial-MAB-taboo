@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import wandb
 from concurrent.futures import ProcessPoolExecutor
+import scipy.stats as stats
 
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import VecEnv
@@ -213,9 +214,11 @@ class WandbEvalCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_freq == 0:
             print(f"Running periodic evaluation at {self.num_timesteps} timesteps...")
-            results, true_surface, path = evaluate_models(self.model, self.eval_env)
+            results, proximity, true_surface, path, success_array = evaluate_models(self.model, self.eval_env)
+
+            fig, axes = plt.subplots(1, 3, figsize=(21, 6))
             
-            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            # 1. Average Step Reward
             ax1 = axes[0]
             for budget, rewards_list in results.items():
                 if len(rewards_list) == 0: continue
@@ -228,44 +231,89 @@ class WandbEvalCallback(BaseCallback):
                 steps = np.arange(1, max_len + 1)
                 ax1.plot(steps, mean_rewards, label=f"Budget: {budget}")
                 ax1.fill_between(steps, mean_rewards - std_rewards, mean_rewards + std_rewards, alpha=0.2)
-                
-            ax1.set_title(f"Average Step Reward (Eval Environments)")
+            ax1.set_title("Average Step Reward")
             ax1.set_xlabel("Steps")
-            ax1.set_ylabel("Average Reward per step")
+            ax1.set_ylabel("Reward")
             ax1.legend()
             ax1.grid(True)
-            
+
+            # 2. Probability Near Max (dist <= 3) per Step
             ax2 = axes[1]
+            for budget, prox_list in proximity.items():
+                if len(prox_list) == 0: continue
+                max_len = max(len(p) for p in prox_list)
+                # For proximity, we pad with the last value (usually 1 if it stayed there)
+                padded_prox = np.array([p + [p[-1]]*(max_len - len(p)) for p in prox_list])
+                mean_prox = np.mean(padded_prox, axis=0)
+                std_prox = np.std(padded_prox, axis=0)
+                steps = np.arange(1, max_len + 1)
+                ax2.plot(steps, mean_prox, label=f"Budget: {budget}")
+                ax2.fill_between(steps, mean_prox - std_prox, mean_prox + std_prox, alpha=0.2)
+            ax2.set_title("Prob. Near Max (Dist <= 3) per Step")
+            ax2.set_xlabel("Steps")
+            ax2.set_ylabel("Probability")
+            ax2.set_ylim(-0.05, 1.05)
+            ax2.legend()
+            ax2.grid(True)
+            
+            # 3. Trajectory
+            ax3 = axes[2]
             if true_surface is not None and len(path) > 0:
-                cax = ax2.imshow(true_surface, origin='lower', cmap='viridis')
-                fig.colorbar(cax, ax=ax2, label="True Reward")
+                cax = ax3.imshow(true_surface, origin='lower', cmap='viridis')
+                fig.colorbar(cax, ax=ax3, label="True Reward")
                 path = np.array(path)
                 xs = path[:, 0]; ys = path[:, 1]
-                ax2.plot(ys, xs, color='white', linewidth=1.5, alpha=0.7)
-                ax2.scatter(ys[0], xs[0], color='blue', s=50, label='Start', zorder=5)
-                ax2.scatter(ys[-1], xs[-1], color='red', s=50, label='End', marker='X', zorder=5)
+                ax3.plot(ys, xs, color='white', linewidth=1.5, alpha=0.7)
+                ax3.scatter(ys[0], xs[0], color='blue', s=50, label='Start', zorder=5)
+                ax3.scatter(ys[-1], xs[-1], color='red', s=50, label='End', marker='X', zorder=5)
                 for i in range(len(ys) - 1):
                     if ys[i] != ys[i+1] or xs[i] != xs[i+1]:
                         dy = ys[i+1] - ys[i]; dx = xs[i+1] - xs[i]
-                        ax2.arrow(ys[i], xs[i], dy*0.5, dx*0.5, head_width=0.3, head_length=0.3, fc='white', ec='white', alpha=0.9, length_includes_head=True)
-                ax2.set_title("Agent Trajectory Layout")
-                ax2.legend()
+                        ax3.arrow(ys[i], xs[i], dy*0.5, dx*0.5, head_width=0.3, head_length=0.3, fc='white', ec='white', alpha=0.9, length_includes_head=True)
+                ax3.set_title("Agent Trajectory Layout")
+                ax3.legend()
             plt.tight_layout()
+
+            # Global proximity average for scalar log
+            overall_success_rate = np.mean(success_array)
             
             if wandb.run is not None:
-                wandb.log({"eval/curves_and_paths": wandb.Image(fig), "global_step": self.num_timesteps}, step=self.num_timesteps)
+                wandb.log({
+                    "eval/curves_and_paths": wandb.Image(fig), 
+                    "eval/p_near_max_avg": overall_success_rate,
+                    "global_step": self.num_timesteps
+                }, step=self.num_timesteps)
+            
             plt.close(fig)
             
         return True
 
 def evaluate_models(model, eval_env):
+    # Unwrap environment to get metadata and true rewards
+    curr = eval_env
+    while hasattr(curr, 'venv'):
+        curr = curr.venv
+    raw_env = curr
+    
+    # Access true rewards (raw_env should be BatchedSpatialBanditEnv)
+    true_rewards = raw_env.true_rewards # (n_envs, grid_size, grid_size)
+    
     obs = eval_env.reset()
     n_envs = eval_env.num_envs
+    grid_size = true_rewards.shape[1]
+    
+    # Find Global Max Coords
+    flat_rewards = true_rewards.view(n_envs, -1)
+    max_coords = torch.argmax(flat_rewards, dim=1)
+    target_x = (max_coords // grid_size).cpu().numpy()
+    target_y = (max_coords % grid_size).cpu().numpy()
     
     cumulative_rewards = np.zeros(n_envs)
     dones = np.zeros(n_envs, dtype=bool)
+    # Track near-max hits for each step in each environment
+    near_max_hits = [[] for _ in range(n_envs)] 
     
-    true_surface_example = eval_env.true_rewards[0].cpu().numpy()
+    true_surface_example = true_rewards[0].cpu().numpy()
     path_example = []
     
     all_rewards = [[] for _ in range(n_envs)]
@@ -278,17 +326,33 @@ def evaluate_models(model, eval_env):
             if not dones[i]:
                 cumulative_rewards[i] += reward[i]
                 all_rewards[i].append(cumulative_rewards[i])
+                
+                # Check proximity: within 3 spatial grid cells (Euclidean dist)
+                pos = info[i]['position']
+                dist = np.sqrt((pos[0] - target_x[i])**2 + (pos[1] - target_y[i])**2)
+                near_max_hits[i].append(float(dist <= 3.0))
+                
                 if i == 0:
                     path_example.append(info[i]['position'])
             
             if terminated[i]:
                 dones[i] = True
-                
+    
+    # success_array[i] will be the fraction of steps in env i that were near the max
+    success_array = np.array([np.mean(hits) if len(hits) > 0 else 0.0 for hits in near_max_hits])
+    
     results_by_budget = {}
+    proximity_by_budget = {}
+    
+    # Use budgets from raw_env
+    budgets_val = raw_env.budget
+
     for i in range(n_envs):
-        b = int(eval_env.budget[i].item())
+        b = int(budgets_val[i].item())
         if b not in results_by_budget:
             results_by_budget[b] = []
+            proximity_by_budget[b] = []
         results_by_budget[b].append(all_rewards[i])
+        proximity_by_budget[b].append(near_max_hits[i])
         
-    return results_by_budget, true_surface_example, path_example
+    return results_by_budget, proximity_by_budget, true_surface_example, path_example, success_array
