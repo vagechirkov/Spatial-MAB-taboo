@@ -16,8 +16,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize, VecMonit
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3 import PPO
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.policies import ActorCriticPolicy
 
 import torch.backends.cudnn as cudnn
 cudnn.benchmark = True
@@ -146,75 +146,80 @@ class BatchedSpatialBanditEnv(VecEnv):
     def env_method(self, method_name, *method_args, indices=None, **method_kwargs): pass
     def env_is_wrapped(self, wrapper_class, indices=None): return [False]*self.num_envs
 
-class CustomCombinedExtractor(BaseFeaturesExtractor):
-    def __init__(self, observation_space: gym.spaces.Dict, features_dim: int = 128, use_attention: bool = True):
-        super().__init__(observation_space, features_dim=features_dim)
-
-        self.use_attention = use_attention
+class SpatialFCNNetwork(nn.Module):
+    def __init__(self, observation_space, action_space_n):
+        super().__init__()
         grid_shape = observation_space.spaces["grid"].shape
-        in_channels = grid_shape[0]
-
-        if self.use_attention:
-            stem_channels = 128
-            self.cnn_stem = nn.Sequential(
-                nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(32, stem_channels, kernel_size=3, stride=2, padding=1),
-                nn.ReLU(),
-            )
-            with torch.no_grad():
-                dummy = torch.zeros(1, *grid_shape)
-                stem_out = self.cnn_stem(dummy)
-                _, C_stem, H_stem, W_stem = stem_out.shape
-                seq_len = H_stem * W_stem
-
-            d_model = 128
-            self.token_proj = nn.Linear(C_stem, d_model)
-            self.pos_embedding = nn.Parameter(torch.randn(1, seq_len, d_model) * 0.02)
-
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=d_model, nhead=8, dim_feedforward=256,
-                dropout=0.0, batch_first=True
-            )
-            self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=2)
-
-            n_flatten = d_model
-        else:
-            self.cnn = nn.Sequential(
-                nn.Conv2d(in_channels, 32, kernel_size=3, stride=2, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-                nn.ReLU(),
-                nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
-                nn.ReLU(),
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-            )
-            with torch.no_grad():
-                dummy_grid = torch.zeros(1, *grid_shape)
-                n_flatten = self.cnn(dummy_grid).shape[1]
-
-        self.linear = nn.Sequential(
-            nn.Linear(n_flatten + 1, features_dim),
+        in_channels = grid_shape[0] + 1 
+        
+        self.shared_conv = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
             nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU()
+        )
+        
+        # ACTOR: 1x1 Conv compresses the 64 channels into exactly 1 action logit per pixel
+        self.actor_conv = nn.Conv2d(64, 1, kernel_size=1)
+        
+        # CRITIC: Estimates the value of the entire board state
+        self.critic_net = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)
         )
 
-    def forward(self, observations: dict) -> torch.Tensor:
-        if self.use_attention:
-            stem_out = self.cnn_stem(observations["grid"])
-            B, C_stem, H_stem, W_stem = stem_out.shape
-            grid_seq = stem_out.view(B, C_stem, -1).permute(0, 2, 1)
-            x = self.token_proj(grid_seq) + self.pos_embedding
-            x = self.transformer(x)
-            grid_feats = x.mean(dim=1)
-        else:
-            grid_feats = self.cnn(observations["grid"])
+    def forward(self, obs):
+        grid = obs["grid"]
+        budget = obs["budget"]
+        B, C, H, W = grid.shape
+        
+        budget_spatial = budget.view(B, 1, 1, 1).expand(B, 1, H, W)
+        x = torch.cat([grid, budget_spatial], dim=1)
+        shared_features = self.shared_conv(x)
+        action_logits_2d = self.actor_conv(shared_features)
+        action_logits = action_logits_2d.view(B, -1)
+        value = self.critic_net(shared_features)
+        
+        return action_logits, value
 
-        budget_feat = observations["budget"]
-        combined = torch.cat([grid_feats, budget_feat], dim=1)
-        return self.linear(combined)
+class FullyConvPolicy(ActorCriticPolicy):
+    def __init__(self, observation_space, action_space, lr_schedule, *args, **kwargs):
+        super().__init__(observation_space, action_space, lr_schedule, *args, **kwargs)
+        
+        self.fcn = SpatialFCNNetwork(self.observation_space, self.action_space.n)
+        
+        self.optimizer = self.optimizer_class(
+            self.parameters(), 
+            lr=lr_schedule(1), 
+            **self.optimizer_kwargs
+        )
+
+    def forward(self, obs, deterministic=False):
+        action_logits, values = self.fcn(obs)
+        distribution = self.action_dist.proba_distribution(action_logits=action_logits)
+        actions = distribution.get_actions(deterministic=deterministic)
+        log_prob = distribution.log_prob(actions)
+        return actions, values, log_prob
+
+    def evaluate_actions(self, obs, actions):
+        action_logits, values = self.fcn(obs)
+        distribution = self.action_dist.proba_distribution(action_logits=action_logits)
+        log_prob = distribution.log_prob(actions)
+        entropy = distribution.entropy()
+        return values, log_prob, entropy
+
+    def get_distribution(self, obs):
+        action_logits, _ = self.fcn(obs)
+        return self.action_dist.proba_distribution(action_logits=action_logits)
+
+    def predict_values(self, obs):
+        _, values = self.fcn(obs)
+        return values
 
 from stable_baselines3.common.logger import KVWriter
 
@@ -267,22 +272,9 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
     eval_env = BatchedSpatialBanditEnv(reward_bank=eval_bank, num_envs=n_eval_envs, grid_size=grid_size, budgets=budgets, device=device)
     eval_env = VecMonitor(eval_env)
 
-    policy_kwargs = dict(
-        features_extractor_class=CustomCombinedExtractor,
-        features_extractor_kwargs=dict(features_dim=128, use_attention=use_attention),
-        net_arch=dict(pi=[64, 64], vf=[64, 64])
-    )
-    
-    print(f"Initializing PPO Component on {train_env.num_envs} environments...")
-    print(f"Hardware Acceleration automatically selected: {device.upper()}")
-
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    
     model = PPO(
-        "MultiInputPolicy", 
+        FullyConvPolicy, 
         train_env, 
-        policy_kwargs=policy_kwargs, 
         verbose=1,
         learning_rate=1e-4,
         ent_coef=0.005,
