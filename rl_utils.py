@@ -234,7 +234,7 @@ class WandbEvalCallback(BaseCallback):
             ax1.set_title("Average Step Reward")
             ax1.set_xlabel("Steps")
             ax1.set_ylabel("Reward")
-            ax1.legend()
+            # ax1.legend()
             ax1.grid(True)
 
             # 2. Probability Near Max (dist <= 3) per Step
@@ -252,8 +252,8 @@ class WandbEvalCallback(BaseCallback):
             ax2.set_title("Prob. Near Max (Dist <= 3) per Step")
             ax2.set_xlabel("Steps")
             ax2.set_ylabel("Probability")
-            ax2.set_ylim(-0.05, 1.05)
-            ax2.legend()
+            ax2.set_ylim(0.0, 1.00)
+            # ax2.legend()
             ax2.grid(True)
             
             # 3. Trajectory
@@ -328,12 +328,14 @@ def evaluate_models(model, eval_env):
                 all_rewards[i].append(cumulative_rewards[i])
                 
                 # Check proximity: within 3 spatial grid cells (Euclidean dist)
-                pos = info[i]['position']
-                dist = np.sqrt((pos[0] - target_x[i])**2 + (pos[1] - target_y[i])**2)
+                # Compute position directly from action to avoid training bottleneck
+                ax_i = action[i] // grid_size
+                ay_i = action[i] % grid_size
+                dist = np.sqrt((ax_i - target_x[i])**2 + (ay_i - target_y[i])**2)
                 near_max_hits[i].append(float(dist <= 3.0))
                 
                 if i == 0:
-                    path_example.append(info[i]['position'])
+                    path_example.append((int(ax_i), int(ay_i)))
             
             if terminated[i]:
                 dones[i] = True

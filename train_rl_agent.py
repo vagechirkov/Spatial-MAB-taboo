@@ -107,21 +107,10 @@ class BatchedSpatialBanditEnv(VecEnv):
         self.steps_taken += 1
         
         rewards = noisy_reward.cpu().numpy()
-        true_rewards_cpu = true_reward.cpu().numpy()
-        noisy_rewards_cpu = noisy_reward.cpu().numpy()
-        x_cpu = x.cpu().numpy()
-        y_cpu = y.cpu().numpy()
-        
         dones = (self.steps_taken >= self.budget)
         dones_np = dones.cpu().numpy()
         
-        infos = []
-        for i in range(self.num_envs):
-            infos.append({
-                'true_reward': float(true_rewards_cpu[i]),
-                'noisy_reward': float(noisy_rewards_cpu[i]),
-                'position': (int(x_cpu[i]), int(y_cpu[i]))
-            })
+        infos = [{} for _ in range(self.num_envs)]
             
         terminal_indices = torch.nonzero(dones).squeeze(1)
         if len(terminal_indices) > 0:
