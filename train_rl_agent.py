@@ -118,7 +118,7 @@ class BatchedSpatialBanditEnv(VecEnv):
             grid_cpu = terminal_obs['grid']
             budget_cpu = terminal_obs['budget']
             term_idx_cpu = terminal_indices.cpu().numpy()
-            
+
             for idx_int in term_idx_cpu:
                 idx_int = int(idx_int)
                 infos[idx_int]['terminal_observation'] = {
@@ -291,8 +291,8 @@ def run_training_and_eval(use_attention=False, environment="correlated_dog", gri
             "learning_rate": 1e-4,
             "ent_coef": 0.005,
             "n_steps": 128,
-            "batch_size": 1024,
-            "n_epochs": 10,
+            "batch_size": 4096,
+            "n_epochs": 5,
             "features_dim": 128,
         },
     )

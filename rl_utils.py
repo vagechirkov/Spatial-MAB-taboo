@@ -158,23 +158,31 @@ def generate_correlated_dog_bank(
     cols_g = cols_g.unsqueeze(0)
     r2 = (rows_g - rows_min)**2 + (cols_g - cols_min)**2
     
-    # Matching dog_rbf_landscape from abm.rewards
+    # Generate raw DoG (naturally approaches 0 at distance)
     dog_inner = torch.exp(-r2 / (2.0 * float(sigma_inner)**2))
     dog_outer = torch.exp(-r2 / (2.0 * float(sigma_outer)**2)) * (float(sigma_inner) / float(sigma_outer))
-    dog = dog_inner - dog_outer
+    raw_dog = dog_inner - dog_outer
     
-    # Scale dog peak to dog_max and center mean
-    dog_flat = dog.view(num_envs, -1)
-    current_dog_max = torch.abs(dog_flat).max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
-    dog = dog / (current_dog_max + 1e-8) * dog_max
-    dog = dog - dog.view(num_envs, -1).mean(dim=1).view(num_envs, 1, 1)
+    # Find the max of the raw DoG for scaling
+    raw_dog_flat = raw_dog.view(num_envs, -1)
+    dog_max_raw = raw_dog_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    
+    # PIECEWISE SCALING: 
+    # Scale positive peak to `dog_max`. Keep negative values exactly as they are.
+    # This ensures the physical width of the base at 0.0 never changes.
+    dog = torch.where(
+        raw_dog > 0, 
+        (raw_dog / (dog_max_raw + 1e-8)) * dog_max, 
+        raw_dog
+    )
 
-    # 4. Result = GP + DoG, then normalize to [0, 1]
+    # 4. Result = GP + DoG
+    # GP is already exactly [0, 1]. GP peak is 1.0. 
+    # DoG is inserted at GP min (0.0), so DoG peak becomes `dog_max`.
     combined = gp_samples.float() + dog
-    c_flat = combined.view(num_envs, -1)
-    c_min = c_flat.min(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
-    c_max = c_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
-    grids = (combined - c_min) / (c_max - c_min + 1e-8)
+    
+    # Clamp at 0 to keep the lowest values strictly fixed and prevent negative valleys.
+    grids = torch.clamp(combined, min=0.0)
     
     return grids.float()
 
@@ -358,3 +366,45 @@ def evaluate_models(model, eval_env):
         proximity_by_budget[b].append(near_max_hits[i])
         
     return results_by_budget, proximity_by_budget, true_surface_example, path_example, success_array
+
+
+def visualize_dog_max_scaling(
+    dog_max_values=[1.2, 1.5, 1.8, 2.0], 
+    grid_size=33, 
+    length_scale=4.0, 
+    seed=42, 
+    device='cpu'
+):
+    print(f"Generating examples for dog_max comparison (Seed: {seed}, Length Scale: {length_scale})...")
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    axes = axes.flatten()
+    
+    for i, dog_max in enumerate(dog_max_values):
+        grids = generate_correlated_dog_bank(
+            num_envs=1,
+            grid_size=grid_size,
+            length_scale=length_scale,
+            dog_max=dog_max,
+            seed=seed,
+            device=device
+        )
+        grid = grids[0].numpy()
+        
+        im = axes[i].imshow(grid, origin='lower', cmap='viridis')
+        axes[i].set_title(f"dog_max = {dog_max}")
+        axes[i].axis('off')
+        fig.colorbar(im, ax=axes[i])
+        
+        # Print stats to verify gradients/peaks
+        print(f"dog_max: {dog_max} | Min: {grid.min():.4f} | Max: {grid.max():.4f}")
+
+    plt.suptitle(f"Correlated DoG Comparison (Seed: {seed}, LS: {length_scale})")
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    save_path = "dog_examples_comparison.png"
+    plt.savefig(save_path)
+    print(f"\nComparison plot saved to: {os.path.abspath(save_path)}")
+
+
+if __name__ == "__main__":
+    visualize_dog_max_scaling(length_scale=4.0)
