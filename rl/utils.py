@@ -186,6 +186,78 @@ def generate_correlated_dog_bank(
     
     return grids.float()
 
+
+def generate_correlated_dog_bank_split(
+    num_envs,
+    grid_size=33,
+    length_scale=10.0,
+    sigma_inner=None,
+    sigma_outer=None,
+    seed=None,
+    device='cuda',
+):
+    """Generate separate GP and DoG components for per-env dog_max scaling.
+    """
+    print(f"Generating split memory bank of {num_envs} correlated-DoG maps on {device}...")
+    if seed is not None:
+        torch.manual_seed(seed)
+
+    # 1. GP part: generate GP samples on double precision for stability
+    x, y = torch.meshgrid(
+        torch.arange(grid_size, device=device, dtype=torch.float64),
+        torch.arange(grid_size, device=device, dtype=torch.float64),
+        indexing='xy'
+    )
+    coords = torch.stack([x.ravel(), y.ravel()], dim=1)
+    dist_sq = torch.cdist(coords, coords, p=2.0) ** 2
+    K = torch.exp(-dist_sq / (2.0 * length_scale ** 2))
+    jitter = 1e-6
+    L = torch.linalg.cholesky(K + jitter * torch.eye(K.size(0), device=device, dtype=torch.float64))
+    z = torch.randn(num_envs, K.size(0), 1, dtype=torch.float64, device=device)
+    gp_samples = torch.matmul(L, z).squeeze(-1).view(num_envs, grid_size, grid_size)
+
+    # 2. Find min indices for each map (before normalization)
+    min_indices = torch.argmin(gp_samples.view(num_envs, -1), dim=1)
+
+    # Normalize GP to [0, 1]
+    gp_flat = gp_samples.view(num_envs, -1)
+    gp_min = gp_flat.min(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    gp_max_val = gp_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    gp_bank = ((gp_samples - gp_min) / (gp_max_val - gp_min + 1e-8)).float()
+
+    rows_min = (min_indices // grid_size).view(num_envs, 1, 1).float()
+    cols_min = (min_indices % grid_size).view(num_envs, 1, 1).float()
+
+    # 3. DoG part — centered at GP minimum, peak normalized to 1.0
+    if sigma_inner is None and sigma_outer is None:
+        sigma_outer = length_scale
+        sigma_inner = sigma_outer / 2.0
+
+    rows_g, cols_g = torch.meshgrid(
+        torch.arange(grid_size, device=device, dtype=torch.float32),
+        torch.arange(grid_size, device=device, dtype=torch.float32),
+        indexing='ij'
+    )
+    rows_g = rows_g.unsqueeze(0)
+    cols_g = cols_g.unsqueeze(0)
+    r2 = (rows_g - rows_min)**2 + (cols_g - cols_min)**2
+
+    dog_inner = torch.exp(-r2 / (2.0 * float(sigma_inner)**2))
+    dog_outer = torch.exp(-r2 / (2.0 * float(sigma_outer)**2)) * (float(sigma_inner) / float(sigma_outer))
+    raw_dog = dog_inner - dog_outer
+
+    # Normalize positive peak to 1.0 (per-map), keep negatives as-is
+    raw_dog_flat = raw_dog.view(num_envs, -1)
+    dog_max_raw = raw_dog_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    dog_bank = torch.where(
+        raw_dog > 0,
+        raw_dog / (dog_max_raw + 1e-8),
+        raw_dog
+    ).float()
+
+    return gp_bank, dog_bank
+
+
 class RegenerateEnvBankCallback(BaseCallback):
     def __init__(self, train_env: VecEnv, generator_fn, regen_freq: int = 1_000_000, verbose: int = 1):
         super().__init__(verbose)
@@ -204,12 +276,18 @@ class RegenerateEnvBankCallback(BaseCallback):
         if self.num_timesteps - self._last_regen >= self.regen_freq:
             if self.verbose >= 1:
                 print(f"[RegenerateEnvBankCallback] Regenerating reward bank at {self.num_timesteps:,} timesteps...")
-            new_bank = self.generator_fn()
+            result = self.generator_fn()
             raw_env = self._unwrap(self.train_env)
-            raw_env.reward_bank = new_bank
+            # Support both split banks (gp_bank, dog_bank) and legacy single bank
+            if isinstance(result, tuple):
+                raw_env.gp_bank, raw_env.dog_bank = result
+                if self.verbose >= 1:
+                    print(f"[RegenerateEnvBankCallback] New split bank shapes: GP={raw_env.gp_bank.shape}, DoG={raw_env.dog_bank.shape}")
+            else:
+                raw_env.reward_bank = result
+                if self.verbose >= 1:
+                    print(f"[RegenerateEnvBankCallback] New bank shape: {result.shape}")
             self._last_regen = self.num_timesteps
-            if self.verbose >= 1:
-                print(f"[RegenerateEnvBankCallback] New bank shape: {new_bank.shape}")
         return True
 
 
@@ -222,79 +300,125 @@ class WandbEvalCallback(BaseCallback):
     def _on_step(self) -> bool:
         if self.n_calls % self.eval_freq == 0:
             print(f"Running periodic evaluation at {self.num_timesteps} timesteps...")
-            results, proximity, true_surface, path, success_array = evaluate_models(self.model, self.eval_env)
+            eval_results = evaluate_models(self.model, self.eval_env)
+            budgets = eval_results["budgets"]
+            dog_maxes = eval_results["dog_maxes"]
+            found_dog = eval_results["found_dog"]
+            t_gp_list = eval_results["t_gp_list"]
+            t_dog_list = eval_results["t_dog_list"]
+            paths = eval_results["paths"]
+            true_surfaces = eval_results["true_surfaces"]
 
-            fig, axes = plt.subplots(1, 3, figsize=(21, 6))
+            # --- Scalar metrics ---
+            valid_t_gp = [t for t in t_gp_list if t is not None]
+            valid_t_dog = [t for t in t_dog_list if t is not None]
+            empirical_t_gp = float(np.mean(valid_t_gp)) if len(valid_t_gp) > 0 else float('nan')
+            empirical_t_dog = float(np.mean(valid_t_dog)) if len(valid_t_dog) > 0 else float('nan')
             
-            # 1. Average Step Reward
-            ax1 = axes[0]
-            for budget, rewards_list in results.items():
-                if len(rewards_list) == 0: continue
-                max_len = max(len(r) for r in rewards_list)
-                padded = np.array([r + [r[-1]]*(max_len - len(r)) for r in rewards_list])
-                steps_array = np.arange(1, max_len + 1)
-                avg_rewards = padded / steps_array
-                mean_rewards = np.mean(avg_rewards, axis=0)
-                std_rewards = np.std(avg_rewards, axis=0)
-                steps = np.arange(1, max_len + 1)
-                ax1.plot(steps, mean_rewards, label=f"Budget: {budget}")
-                ax1.fill_between(steps, mean_rewards - std_rewards, mean_rewards + std_rewards, alpha=0.2)
-            ax1.set_title("Average Step Reward")
-            ax1.set_xlabel("Steps")
-            ax1.set_ylabel("Reward")
-            # ax1.legend()
-            ax1.grid(True)
+            avg_reward_per_step = float(np.mean(eval_results["avg_rewards"]))
 
-            # 2. Probability Near Max (dist <= 3) per Step
-            ax2 = axes[1]
-            for budget, prox_list in proximity.items():
-                if len(prox_list) == 0: continue
-                max_len = max(len(p) for p in prox_list)
-                # For proximity, we pad with the last value (usually 1 if it stayed there)
-                padded_prox = np.array([p + [p[-1]]*(max_len - len(p)) for p in prox_list])
-                mean_prox = np.mean(padded_prox, axis=0)
-                std_prox = np.std(padded_prox, axis=0)
-                steps = np.arange(1, max_len + 1)
-                ax2.plot(steps, mean_prox, label=f"Budget: {budget}")
-                ax2.fill_between(steps, mean_prox - std_prox, mean_prox + std_prox, alpha=0.2)
-            ax2.set_title("Prob. Near Max (Dist <= 3) per Step")
-            ax2.set_xlabel("Steps")
-            ax2.set_ylabel("Probability")
-            ax2.set_ylim(0.0, 1.00)
-            # ax2.legend()
-            ax2.grid(True)
-            
-            # 3. Trajectory
-            ax3 = axes[2]
-            if true_surface is not None and len(path) > 0:
-                cax = ax3.imshow(true_surface, origin='lower', cmap='viridis')
-                fig.colorbar(cax, ax=ax3, label="True Reward")
-                path = np.array(path)
-                xs = path[:, 0]; ys = path[:, 1]
-                ax3.plot(ys, xs, color='white', linewidth=1.5, alpha=0.7)
-                ax3.scatter(ys[0], xs[0], color='blue', s=50, label='Start', zorder=5)
-                ax3.scatter(ys[-1], xs[-1], color='red', s=50, label='End', marker='X', zorder=5)
-                for i in range(len(ys) - 1):
-                    if ys[i] != ys[i+1] or xs[i] != xs[i+1]:
-                        dy = ys[i+1] - ys[i]; dx = xs[i+1] - xs[i]
-                        ax3.arrow(ys[i], xs[i], dy*0.5, dx*0.5, head_width=0.3, head_length=0.3, fc='white', ec='white', alpha=0.9, length_includes_head=True)
-                ax3.set_title("Agent Trajectory Layout")
-                ax3.legend()
-            plt.tight_layout()
+            log_dict = {
+                "eval/empirical_t_gp": empirical_t_gp,
+                "eval/empirical_t_dog": empirical_t_dog,
+                "eval/found_dog_rate": float(np.mean(found_dog)),
+                "eval/avg_reward_per_step": avg_reward_per_step,
+                "global_step": self.num_timesteps,
+            }
 
-            # Global proximity average for scalar log
-            overall_success_rate = np.mean(success_array)
-            
+            # --- Plot 1: Trajectories (4x4 grid) ---
+            n_plots = min(16, len(paths))
+            if n_plots > 0:
+                fig_traj, axes_traj = plt.subplots(4, 4, figsize=(20, 20))
+                axes_traj = axes_traj.flatten()
+                for idx in range(16):
+                    ax = axes_traj[idx]
+                    if idx < n_plots and true_surfaces[idx] is not None and len(paths[idx]) > 0:
+                        surface = true_surfaces[idx]
+                        cax = ax.imshow(surface, origin='lower', cmap='viridis')
+                        fig_traj.colorbar(cax, ax=ax, fraction=0.046, pad=0.04)
+                        path = np.array(paths[idx])
+                        xs = path[:, 0]
+                        ys = path[:, 1]
+                        ax.plot(ys, xs, color='white', linewidth=1.5, alpha=0.8)
+                        ax.scatter(ys[0], xs[0], color='cyan', s=80, label='Start', zorder=5, edgecolors='black')
+                        ax.scatter(ys[-1], xs[-1], color='red', s=80, label='End', marker='X', zorder=5, edgecolors='black')
+                        T_val = budgets[idx]
+                        R_val = dog_maxes[idx]
+                        ax.set_title(f"T={T_val:.0f}, R={R_val:.2f}", fontsize=12)
+                        ax.legend(loc='upper right', fontsize=8)
+                    else:
+                        ax.set_visible(False)
+                fig_traj.suptitle("Agent Trajectories", fontsize=14)
+                plt.tight_layout()
+                log_dict["eval/trajectories"] = wandb.Image(fig_traj)
+                plt.close(fig_traj)
+
+            # --- Plot 2: Policy Heatmap ---
+            budgets_arr = np.array(budgets, dtype=np.float64)
+            dog_maxes_arr = np.array(dog_maxes, dtype=np.float64)
+            found_dog_arr = np.array(found_dog, dtype=np.float64)
+
+            if len(budgets_arr) > 0:
+                # Define bins for heatmap
+                unique_budgets = np.unique(budgets_arr)
+                budget_edges = np.concatenate([
+                    unique_budgets - 0.5 * np.diff(np.concatenate([[unique_budgets[0]], unique_budgets])[:len(unique_budgets)+1])[:len(unique_budgets)],
+                    [unique_budgets[-1] + 0.5 * (unique_budgets[-1] - unique_budgets[-2]) if len(unique_budgets) > 1 else unique_budgets[-1] + 1]
+                ])
+                # Simpler: use unique budget values to make edges
+                if len(unique_budgets) > 1:
+                    half_gaps = np.diff(unique_budgets) / 2.0
+                    budget_edges = np.concatenate([
+                        [unique_budgets[0] - half_gaps[0]],
+                        unique_budgets[:-1] + half_gaps,
+                        [unique_budgets[-1] + half_gaps[-1]]
+                    ])
+                else:
+                    budget_edges = np.array([unique_budgets[0] - 1, unique_budgets[0] + 1])
+                
+                n_r_bins = 10
+                r_edges = np.linspace(dog_maxes_arr.min() - 0.01, dog_maxes_arr.max() + 0.01, n_r_bins + 1)
+
+                try:
+                    stat_result = stats.binned_statistic_2d(
+                        budgets_arr, dog_maxes_arr, found_dog_arr,
+                        statistic='mean',
+                        bins=[budget_edges, r_edges]
+                    )
+                    heatmap = stat_result.statistic.T  # shape: (n_r_bins, n_budget_bins)
+
+                    fig_hm, ax_hm = plt.subplots(1, 1, figsize=(10, 7))
+                    extent = [budget_edges[0], budget_edges[-1], r_edges[0], r_edges[-1]]
+                    im = ax_hm.imshow(
+                        heatmap, origin='lower', aspect='auto', extent=extent,
+                        cmap='RdBu_r', vmin=0.0, vmax=1.0
+                    )
+                    fig_hm.colorbar(im, ax=ax_hm, label="P(Found DoG)")
+
+                    # Overlay theoretical T_critical line
+                    if not (np.isnan(empirical_t_gp) or np.isnan(empirical_t_dog)):
+                        R_vals = np.linspace(max(r_edges[0], 1.01), r_edges[-1], 200)
+                        T_crit = (R_vals * empirical_t_dog - empirical_t_gp) / (R_vals - 1.0)
+                        ax_hm.plot(T_crit, R_vals, color='lime', linewidth=2.5, linestyle='--',
+                                   label=f'T_crit (t_gp={empirical_t_gp:.1f}, t_dog={empirical_t_dog:.1f})')
+                        ax_hm.legend(loc='upper right', fontsize=9)
+
+                    ax_hm.set_xlabel("Time Budget (T)", fontsize=12)
+                    ax_hm.set_ylabel("Dog Max (R)", fontsize=12)
+                    ax_hm.set_title("Policy Heatmap: Explore vs Exploit", fontsize=14)
+                    ax_hm.set_xlim(budget_edges[0], budget_edges[-1])
+                    ax_hm.set_ylim(r_edges[0], r_edges[-1])
+                    plt.tight_layout()
+                    log_dict["eval/policy_heatmap"] = wandb.Image(fig_hm)
+                    plt.close(fig_hm)
+                except Exception as e:
+                    print(f"[WandbEvalCallback] Policy heatmap failed: {e}")
+
             if wandb.run is not None:
-                wandb.log({
-                    "eval/curves_and_paths": wandb.Image(fig), 
-                    "eval/p_near_max_avg": overall_success_rate,
-                    "global_step": self.num_timesteps
-                }, step=self.num_timesteps)
-            
-            plt.close(fig)
-            
+                wandb.log(log_dict, step=self.num_timesteps)
+
         return True
+
 
 def evaluate_models(model, eval_env):
     # Unwrap environment to get metadata and true rewards
@@ -302,70 +426,71 @@ def evaluate_models(model, eval_env):
     while hasattr(curr, 'venv'):
         curr = curr.venv
     raw_env = curr
-    
-    # Access true rewards (raw_env should be BatchedSpatialBanditEnv)
-    true_rewards = raw_env.true_rewards # (n_envs, grid_size, grid_size)
-    
+
+    true_rewards = raw_env.true_rewards  # (n_envs, grid_size, grid_size)
     obs = eval_env.reset()
     n_envs = eval_env.num_envs
     grid_size = true_rewards.shape[1]
-    
-    # Find Global Max Coords
-    flat_rewards = true_rewards.view(n_envs, -1)
-    max_coords = torch.argmax(flat_rewards, dim=1)
-    target_x = (max_coords // grid_size).cpu().numpy()
-    target_y = (max_coords % grid_size).cpu().numpy()
-    
-    cumulative_rewards = np.zeros(n_envs)
+
+    # Per-env tracking
     dones = np.zeros(n_envs, dtype=bool)
-    # Track near-max hits for each step in each environment
-    near_max_hits = [[] for _ in range(n_envs)] 
-    
-    true_surface_example = true_rewards[0].cpu().numpy()
-    path_example = []
-    
-    all_rewards = [[] for _ in range(n_envs)]
-    
+    t_gp = [None] * n_envs       # first step with reward > 0.95
+    t_dog = [None] * n_envs      # first step with reward > 1.05
+    max_reward = np.zeros(n_envs) # max reward seen per env
+    total_reward = np.zeros(n_envs)
+    step_count = np.zeros(n_envs, dtype=int)
+
+    # Track paths for first 16 envs (visualization grid)
+    n_path_envs = min(16, n_envs)
+    paths = [[] for _ in range(n_path_envs)]
+    true_surfaces = []
+    for i in range(n_path_envs):
+        true_surfaces.append(true_rewards[i].cpu().numpy())
+
+    # Get budgets and dog_maxes at the start (they were set during reset)
+    budgets_tensor = raw_env.budget.cpu().numpy()
+    dog_maxes_tensor = raw_env.current_dog_max.cpu().numpy()
+
     while not np.all(dones):
         action, _states = model.predict(obs, deterministic=True)
         obs, reward, terminated, info = eval_env.step(action)
-        
+
         for i in range(n_envs):
             if not dones[i]:
-                cumulative_rewards[i] += reward[i]
-                all_rewards[i].append(cumulative_rewards[i])
-                
-                # Check proximity: within 3 spatial grid cells (Euclidean dist)
-                # Compute position directly from action to avoid training bottleneck
-                ax_i = action[i] // grid_size
-                ay_i = action[i] % grid_size
-                dist = np.sqrt((ax_i - target_x[i])**2 + (ay_i - target_y[i])**2)
-                near_max_hits[i].append(float(dist <= 3.0))
-                
-                if i == 0:
-                    path_example.append((int(ax_i), int(ay_i)))
-            
+                step_count[i] += 1
+                r = reward[i]
+                total_reward[i] += r
+                max_reward[i] = max(max_reward[i], r)
+
+                # Track first GP hit
+                if t_gp[i] is None and r > 0.95:
+                    t_gp[i] = int(step_count[i])
+
+                # Track first DoG hit
+                if t_dog[i] is None and r > 1.05:
+                    t_dog[i] = int(step_count[i])
+
+                # Track path for first 4 envs
+                if i < n_path_envs:
+                    ax_i = action[i] // grid_size
+                    ay_i = action[i] % grid_size
+                    paths[i].append((int(ax_i), int(ay_i)))
+
             if terminated[i]:
                 dones[i] = True
-    
-    # success_array[i] will be the fraction of steps in env i that were near the max
-    success_array = np.array([np.mean(hits) if len(hits) > 0 else 0.0 for hits in near_max_hits])
-    
-    results_by_budget = {}
-    proximity_by_budget = {}
-    
-    # Use budgets from raw_env
-    budgets_val = raw_env.budget
 
-    for i in range(n_envs):
-        b = int(budgets_val[i].item())
-        if b not in results_by_budget:
-            results_by_budget[b] = []
-            proximity_by_budget[b] = []
-        results_by_budget[b].append(all_rewards[i])
-        proximity_by_budget[b].append(near_max_hits[i])
-        
-    return results_by_budget, proximity_by_budget, true_surface_example, path_example, success_array
+    found_dog = [bool(max_reward[i] > 1.05) for i in range(n_envs)]
+
+    return {
+        "budgets": budgets_tensor.tolist(),
+        "dog_maxes": dog_maxes_tensor.tolist(),
+        "found_dog": found_dog,
+        "t_gp_list": t_gp,
+        "t_dog_list": t_dog,
+        "avg_rewards": (total_reward / budgets_tensor).tolist(),
+        "paths": paths,
+        "true_surfaces": true_surfaces,
+    }
 
 
 def visualize_dog_max_scaling(
