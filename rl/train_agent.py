@@ -25,7 +25,7 @@ cudnn.benchmark = True
 import wandb
 from wandb.integration.sb3 import WandbCallback
 
-from rl_utils import generate_cholesky_bank, generate_mexican_hat_bank, generate_correlated_dog_bank, WandbEvalCallback, RegenerateEnvBankCallback
+from rl.utils import generate_cholesky_bank, generate_mexican_hat_bank, generate_correlated_dog_bank, WandbEvalCallback, RegenerateEnvBankCallback
 from stable_baselines3.common.vec_env import VecEnv
 
 class BatchedSpatialBanditEnv(VecEnv):
