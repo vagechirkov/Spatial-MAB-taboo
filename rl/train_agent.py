@@ -343,8 +343,8 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
     # 0. Hyperparameter Configuration
     config = {
         "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "num_envs": 256,
-        "frames_per_batch": 256 * 200,
+        "num_envs": 256 if grid_size <= 22 else 128,
+        "frames_per_batch": 256 * 200 if grid_size <= 22 else 128 * 200,
         "mini_batch_size": 2048,
         "ppo_epochs": 4,
         "learning_rate": 5e-4,

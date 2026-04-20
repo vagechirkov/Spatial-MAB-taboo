@@ -180,7 +180,8 @@ python rl/train_agent.py
 # CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py
 # watch -n 1 nvidia-smi
 NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=0 python rl/train_agent.py --total_timesteps 500000000
-NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_scale 3.0 --total_timesteps 500000000
+NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 25 50 100 200 --dog_max_range 1.2 2.2 --total_timesteps 500000000
+NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py --length_scale 2.5 --grid_size 22 --total_timesteps 500000000
 ```
 
 
