@@ -227,15 +227,54 @@ class SpatialTrunk(nn.Module):
         C, H, W = grid.shape[-3:]
         
         # Expand scalar inputs into spatial channels
-        grid_flat = grid.view(-1, C, H, W)
-        step_frac_spatial = step_fraction.view(-1, 1, 1, 1).expand(-1, 1, H, W)
-        budget_spatial = total_budget.view(-1, 1, 1, 1).expand(-1, 1, H, W)
-        dog_max_spatial = dog_max.view(-1, 1, 1, 1).expand(-1, 1, H, W)
+        grid_flat = grid.reshape(-1, C, H, W)
+        step_frac_spatial = step_fraction.reshape(-1, 1, 1, 1).expand(-1, 1, H, W)
+        budget_spatial = total_budget.reshape(-1, 1, 1, 1).expand(-1, 1, H, W)
+        dog_max_spatial = dog_max.reshape(-1, 1, 1, 1).expand(-1, 1, H, W)
         
         x = torch.cat([grid_flat, step_frac_spatial, budget_spatial, dog_max_spatial], dim=1)
         features = self.net(x)
         
-        return features.view(*batch_dims, 32, H, W)
+        return features.reshape(*batch_dims, 32, H, W)
+
+
+class EfficientSpatialTrunk(nn.Module):
+    def __init__(self, grid_size=33):
+        super().__init__()
+        # Only takes the 2D grid: 2 channels (revealed, visited)
+        self.conv_net = nn.Sequential(
+            nn.Conv2d(2, 32, kernel_size=3, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=2, dilation=2), nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, padding=4, dilation=4), nn.ReLU()
+        )
+        
+        # MLPs to generate FiLM parameters from the 3 scalars
+        self.film_scale = nn.Linear(3, 32)
+        self.film_shift = nn.Linear(3, 32)
+        
+    def forward(self, grid, step_fraction, total_budget, dog_max):
+        batch_dims = grid.shape[:-3]
+        C, H, W = grid.shape[-3:]
+
+        # 1. Process spatial data (flatten batch dims for conv layer)
+        grid_flat = grid.view(-1, C, H, W)
+        x_flat = self.conv_net(grid_flat) 
+        
+        # 2. Process scalars (flatten batch dims for linear layers)
+        scalars_flat = torch.cat([
+            step_fraction.view(-1, 1), 
+            total_budget.view(-1, 1), 
+            dog_max.view(-1, 1)
+        ], dim=-1)
+        
+        scale = self.film_scale(scalars_flat).view(-1, 32, 1, 1)
+        shift = self.film_shift(scalars_flat).view(-1, 32, 1, 1)
+        
+        # 3. Modulate (FiLM)
+        out_flat = (x_flat * scale) + shift
+        
+        # 4. Unflatten to original batch dims
+        return out_flat.view(*batch_dims, 32, H, W)
 
 class DecoupledNet(nn.Module):
     """Joins a spatial trunk with a head, handling multi-argument forwarding."""
@@ -266,14 +305,24 @@ class CriticHead(nn.Module):
     """Outputs a single state value, preserving spatial hierarchies via downsampling."""
     def __init__(self, grid_size=33):
         super().__init__()
-        self.net = nn.Sequential(
-            # Input is [Batch, 32, 33, 33]
-            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1), nn.GroupNorm(4, 32), nn.ReLU(), # -> 17x17
-            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1), nn.GroupNorm(4, 32), nn.ReLU(), # -> 9x9
-            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1), nn.GroupNorm(4, 32), nn.ReLU(), # -> 5x5
+        
+        self.conv_part = nn.Sequential(
+            # Input is [Batch, 32, grid_size, grid_size]
+            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1), nn.ReLU(),
+        )
+        
+        # Calculate the flattened size after convolutions
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, 32, grid_size, grid_size)
+            dummy_output = self.conv_part(dummy_input)
+            flattened_size = dummy_output.numel()
 
+        self.net = nn.Sequential(
+            self.conv_part,
             nn.Flatten(start_dim=-3), 
-            nn.Linear(800, 128), nn.ReLU(), 
+            nn.Linear(flattened_size, 128), nn.ReLU(), 
             nn.Linear(128, 1)
         )
         
@@ -293,11 +342,11 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
     
     # Hyperparameters
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_envs = 128
-    frames_per_batch = num_envs * 128
-    mini_batch_size = 512
+    num_envs = 256
+    frames_per_batch = num_envs * 200
+    mini_batch_size = 2048
     ppo_epochs = 4
-    learning_rate = 2e-4
+    learning_rate = 5e-4
 
     # 1. Environment Initialization
     train_gp_bank, train_dog_bank = generate_correlated_dog_bank_split(
@@ -312,13 +361,14 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         300, grid_size, length_scale=length_scale, device=device
     )
     eval_env = BatchedSpatialBanditEnv(
-        eval_gp_bank, eval_dog_bank, num_envs=4096, 
+        eval_gp_bank, eval_dog_bank, num_envs=8192, 
         grid_size=grid_size, budgets=budgets, dog_max_range=dog_max_range, 
         device=device, fixed_eval_grid=True
     )
 
     # 2. Network Instantiation
-    actor_trunk = SpatialTrunk().to(device)
+    # actor_trunk = SpatialTrunk(grid_size=grid_size).to(device)
+    actor_trunk = EfficientSpatialTrunk(grid_size=grid_size).to(device)
     actor_head = ActorHead().to(device)
     policy_module = TensorDictModule(
         DecoupledNet(actor_trunk, actor_head), 
@@ -326,8 +376,9 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         out_keys=["logits"]
     )
 
-    critic_trunk = SpatialTrunk().to(device)
-    critic_head = CriticHead().to(device)
+    # critic_trunk = SpatialTrunk(grid_size=grid_size).to(device)
+    critic_trunk = EfficientSpatialTrunk(grid_size=grid_size).to(device)
+    critic_head = CriticHead(grid_size=grid_size).to(device)
     value_module = TensorDictModule(
         DecoupledNet(critic_trunk, critic_head), 
         in_keys=["grid", "step_fraction", "total_budget", "dog_max"], 
@@ -378,7 +429,7 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
     
     # 4. Logging & Tracking
     logger = WandbLogger(exp_name=f"UniversalNN_{int(time.time())}", project="Spatial-MAB-taboo")
-    eval_callback = WandbEvalCallback(eval_env, eval_freq=300_000)
+    eval_callback = WandbEvalCallback(eval_env, eval_freq=1_000_000)
 
     pbar = tqdm(total=total_timesteps)
     ep_rewards = deque(maxlen=100)
@@ -400,8 +451,8 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
                 
         # Compute Advantages
         with torch.no_grad(): 
-            with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                adv_module(data)
+            # Use float32 for GAE stability and to avoid mixed-type bias errors
+            adv_module(data)
             
         # Push flat data into buffer
         replay_buffer.extend(data.reshape(-1))
@@ -440,14 +491,17 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
 
         replay_buffer.empty()
         
-        if total_frames - last_regen >= 10_000_000:
-            train_env.gp_bank, train_env.dog_bank = generate_correlated_dog_bank_split(10_000, 33, device=device)
+        if total_frames - last_regen >= 500_000:
+            train_env.gp_bank, train_env.dog_bank = generate_correlated_dog_bank_split(
+                10_000, grid_size, length_scale=length_scale, device=device
+            )
             last_regen = total_frames
 
             torch.cuda.empty_cache()
             
     torch.save(policy_forward.state_dict(), "final_fcn.pt")
-    logger.finish()
+    if logger is not None:
+        logger.experiment.finish()
 
 
 if __name__ == "__main__":
@@ -458,14 +512,14 @@ if __name__ == "__main__":
         "--environment", type=str, default="correlated_dog", 
         choices=["simple_gp", "mexican_hat", "correlated_dog"]
     )
-    parser.add_argument("--grid_size", type=int, default=33)
+    parser.add_argument("--grid_size", type=int, default=22)
     parser.add_argument(
-        "--budgets", type=int, nargs="+", default=[50, 100, 150, 200],
+        "--budgets", type=int, nargs="+", default=[15, 30, 45, 60],
         help="Time budget(s) per episode"
     )
     parser.add_argument("--length_scale", type=float, default=4.0)
     parser.add_argument(
-        "--dog_max_range", type=float, nargs=2, default=[1.2, 3.0],
+        "--dog_max_range", type=float, nargs=2, default=[1.2, 1.8],
         help="Range [low, high] for DoG peak multiplier"
     )
     parser.add_argument("--total_timesteps", type=int, default=100_000_000)

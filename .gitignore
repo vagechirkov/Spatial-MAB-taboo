@@ -321,3 +321,4 @@ abm/sbi-simulations
 mab_logs
 *.zip
 wandb
+*.pt
