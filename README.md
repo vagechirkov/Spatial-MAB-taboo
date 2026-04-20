@@ -179,17 +179,7 @@ export PYTHONPATH=$(pwd):$PYTHONPATH
 python rl/train_agent.py
 # CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py
 # watch -n 1 nvidia-smi
-CUDA_VISIBLE_DEVICES=0 python rl/train_agent.py --environment simple_gp --budgets 50 --length_scale 4.0
-CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py --environment correlated_dog --budgets 15 --length_scale 4.0
-CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py --environment correlated_dog --budgets 100 --length_scale 4.0 --total_timesteps 1000000000
-CUDA_VISIBLE_DEVICES=0 python rl/train_agent.py --environment correlated_dog --budgets 300 --length_scale 4.0 --total_timesteps 1000000000
-CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --environment correlated_dog --dog_max 2.0 --budgets 100 --length_scale 4.0 --total_timesteps 1000000000
-CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --environment correlated_dog --dog_max 10.0 --budgets 50 --length_scale 4.0 --total_timesteps 1000000000
-CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --environment correlated_dog --budgets 500 --length_scale 4.0 --total_timesteps 1000000000
-
-
-CUDA_VISIBLE_DEVICES=0 python rl/train_agent.py --environment correlated_dog --budgets 300 --length_scale 4.0 --total_timesteps 300000000
-CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --environment correlated_dog --budgets 600 --length_scale 4.0 --total_timesteps 300000000
+NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=0 python rl/train_agent.py --total_timesteps 500000000
 ```
 
 
