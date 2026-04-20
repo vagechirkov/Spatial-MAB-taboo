@@ -340,45 +340,67 @@ class CriticHead(nn.Module):
 def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 100, 150, 200], 
                  length_scale=4.0, dog_max_range=[1.0, 3.0], total_timesteps=100_000_000):
     
-    # Hyperparameters
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    num_envs = 256
-    frames_per_batch = num_envs * 200
-    mini_batch_size = 2048
-    ppo_epochs = 4
-    learning_rate = 5e-4
+    # 0. Hyperparameter Configuration
+    config = {
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "num_envs": 256,
+        "frames_per_batch": 256 * 200,
+        "mini_batch_size": 2048,
+        "ppo_epochs": 4,
+        "learning_rate": 5e-4,
+        "environment": environment,
+        "grid_size": grid_size,
+        "budgets": budgets,
+        "length_scale": length_scale,
+        "dog_max_range": dog_max_range,
+        "total_timesteps": total_timesteps,
+        "clip_epsilon": 0.2,
+        "entropy_bonus": True,
+        "entropy_coeff": 0.015,
+        "critic_coeff": 0.5,
+        "loss_critic_type": "smooth_l1",
+        "gamma": 0.99,
+        "lmbda": 0.95,
+        "trunk_type": "EfficientSpatialTrunk",
+        "reward_scale": 10.0,
+        "noise_std": 0.01,
+        "regen_freq": 250_000,
+    }
 
     # 1. Environment Initialization
     train_gp_bank, train_dog_bank = generate_correlated_dog_bank_split(
-        10_000, grid_size, length_scale=length_scale, device=device
+        10_000, config["grid_size"], length_scale=config["length_scale"], device=config["device"]
     )
     train_env = BatchedSpatialBanditEnv(
-        train_gp_bank, train_dog_bank, num_envs=num_envs, 
-        grid_size=grid_size, budgets=budgets, dog_max_range=dog_max_range, device=device
+        train_gp_bank, train_dog_bank, num_envs=config["num_envs"], 
+        grid_size=config["grid_size"], budgets=config["budgets"], 
+        dog_max_range=config["dog_max_range"], 
+        noise_std=config["noise_std"], device=config["device"]
     )
     
     eval_gp_bank, eval_dog_bank = generate_correlated_dog_bank_split(
-        300, grid_size, length_scale=length_scale, device=device
+        300, config["grid_size"], length_scale=config["length_scale"], device=config["device"]
     )
     eval_env = BatchedSpatialBanditEnv(
         eval_gp_bank, eval_dog_bank, num_envs=8192, 
-        grid_size=grid_size, budgets=budgets, dog_max_range=dog_max_range, 
-        device=device, fixed_eval_grid=True
+        grid_size=config["grid_size"], budgets=config["budgets"], 
+        dog_max_range=config["dog_max_range"], 
+        device=config["device"], fixed_eval_grid=True
     )
 
     # 2. Network Instantiation
-    # actor_trunk = SpatialTrunk(grid_size=grid_size).to(device)
-    actor_trunk = EfficientSpatialTrunk(grid_size=grid_size).to(device)
-    actor_head = ActorHead().to(device)
+    # actor_trunk = SpatialTrunk(grid_size=config["grid_size"]).to(config["device"])
+    actor_trunk = EfficientSpatialTrunk(grid_size=config["grid_size"]).to(config["device"])
+    actor_head = ActorHead().to(config["device"])
     policy_module = TensorDictModule(
         DecoupledNet(actor_trunk, actor_head), 
         in_keys=["grid", "step_fraction", "total_budget", "dog_max"], 
         out_keys=["logits"]
     )
 
-    # critic_trunk = SpatialTrunk(grid_size=grid_size).to(device)
-    critic_trunk = EfficientSpatialTrunk(grid_size=grid_size).to(device)
-    critic_head = CriticHead(grid_size=grid_size).to(device)
+    # critic_trunk = SpatialTrunk(grid_size=config["grid_size"]).to(config["device"])
+    critic_trunk = EfficientSpatialTrunk(grid_size=config["grid_size"]).to(config["device"])
+    critic_head = CriticHead(grid_size=config["grid_size"]).to(config["device"])
     value_module = TensorDictModule(
         DecoupledNet(critic_trunk, critic_head), 
         in_keys=["grid", "step_fraction", "total_budget", "dog_max"], 
@@ -390,12 +412,12 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         module=policy_module, 
         spec=train_env.action_spec, in_keys=["logits"], out_keys=["action"], 
         distribution_class=CategoricalDist, return_log_prob=True
-    ).to(device)
+    ).to(config["device"])
     
     value_forward = ValueOperator(
         module=value_module, 
         in_keys=["grid", "step_fraction", "total_budget", "dog_max"]
-    ).to(device)
+    ).to(config["device"])
 
     policy_loss = policy_forward
     value_loss = value_forward
@@ -403,32 +425,44 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
     # 3. TorchRL Pipeline Objects
     collector = Collector(
         train_env, policy_forward, 
-        frames_per_batch=frames_per_batch, total_frames=total_timesteps, 
-        device=device, storing_device=device
+        frames_per_batch=config["frames_per_batch"], total_frames=config["total_timesteps"], 
+        device=config["device"], storing_device=config["device"]
     )
     
     replay_buffer = TensorDictReplayBuffer(
-        storage=LazyTensorStorage(frames_per_batch, device=device), 
+        storage=LazyTensorStorage(config["frames_per_batch"], device=config["device"]), 
         sampler=SamplerWithoutReplacement(),
-        batch_size=mini_batch_size
+        batch_size=config["mini_batch_size"]
     )
     
     loss_module = ClipPPOLoss(
         policy_loss, value_loss, 
-        clip_epsilon=0.2, entropy_bonus=True, entropy_coeff=0.015, 
-        critic_coeff=0.5, loss_critic_type="smooth_l1"
+        clip_epsilon=config["clip_epsilon"], 
+        entropy_bonus=config["entropy_bonus"], 
+        entropy_coeff=config["entropy_coeff"], 
+        critic_coeff=config["critic_coeff"], 
+        loss_critic_type=config["loss_critic_type"]
     )
     loss_module.set_keys(reward=("next", "reward"))
     
-    adv_module = GAE(gamma=0.99, lmbda=0.95, value_network=value_forward, average_gae=True)
+    adv_module = GAE(
+        gamma=config["gamma"], 
+        lmbda=config["lmbda"], 
+        value_network=value_forward, 
+        average_gae=True
+    )
     
     optimizer = torch.optim.Adam(
         list(policy_module.parameters()) + list(value_module.parameters()), 
-        lr=learning_rate
+        lr=config["learning_rate"]
     )
     
     # 4. Logging & Tracking
-    logger = WandbLogger(exp_name=f"UniversalNN_{int(time.time())}", project="Spatial-MAB-taboo")
+    logger = WandbLogger(
+        exp_name=f"UniversalNN_{int(time.time())}", 
+        project="Spatial-MAB-taboo",
+        config=config
+    )
     eval_callback = WandbEvalCallback(eval_env, eval_freq=1_000_000)
 
     pbar = tqdm(total=total_timesteps)
@@ -458,9 +492,9 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         replay_buffer.extend(data.reshape(-1))
         
         # PPO Optimization Epochs
-        for _ in range(ppo_epochs):
+        for _ in range(config["ppo_epochs"]):
             # Calculate total mini-batches needed to cover the rollout
-            num_mini_batches = frames_per_batch // mini_batch_size
+            num_mini_batches = config["frames_per_batch"] // config["mini_batch_size"]
             
             for _ in range(num_mini_batches):
                 # Pulls exactly 1 mini-batch of size [2048]
@@ -491,9 +525,9 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
 
         replay_buffer.empty()
         
-        if total_frames - last_regen >= 500_000:
+        if total_frames - last_regen >= config["regen_freq"]:
             train_env.gp_bank, train_env.dog_bank = generate_correlated_dog_bank_split(
-                10_000, grid_size, length_scale=length_scale, device=device
+                10_000, config["grid_size"], length_scale=config["length_scale"], device=config["device"]
             )
             last_regen = total_frames
 
