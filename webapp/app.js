@@ -176,16 +176,17 @@ class GPEnvironment {
         return smoothed;
     }
 
-    // DoG (Difference of Gaussians) kernel
+    // DoG (Difference of Gaussians) kernel - matches Python's dog_rbf_landscape
     dogKernel(x, y, centerX, centerY, sigmaInner, sigmaOuter) {
         const dx = x - centerX;
         const dy = y - centerY;
         const r2 = dx * dx + dy * dy;
         
         const inner = Math.exp(-r2 / (2 * sigmaInner * sigmaInner));
-        const outer = Math.exp(-r2 / (2 * sigmaOuter * sigmaOuter)) * (sigmaInner / sigmaOuter);
+        const outer = Math.exp(-r2 / (2 * sigmaOuter * sigmaOuter));
         
-        return inner - outer;
+        // Python uses: dog = inner - outer * (sigma_inner/sigma_outer)
+        return inner - outer * (sigmaInner / sigmaOuter);
     }
 
     // Find minimum coordinates in a grid
@@ -324,6 +325,7 @@ let revealed = [];
 let lastReward = null;
 let cumulativeReward = 0;
 let clickCount = 0;
+let cellValues = []; // Store observed values for each cell
 
 // Initialize game
 function initGame() {
@@ -333,6 +335,7 @@ function initGame() {
         
         // Reset state
         revealed = Array(gridSize).fill(null).map(() => Array(gridSize).fill(false));
+        cellValues = Array(gridSize).fill(null).map(() => Array(gridSize).fill(null));
         lastReward = null;
         cumulativeReward = 0;
         clickCount = 0;
@@ -370,8 +373,17 @@ function renderGrid() {
             
             if (revealed[y][x]) {
                 cell.classList.add('revealed');
-                const reward = game.getReward(x, y, 0); // Get true value for display
+                const reward = cellValues[y][x];
                 cell.style.backgroundColor = getColorForValue(reward);
+                // Display the observed value inside the cell
+                cell.textContent = reward.toFixed(2);
+                cell.style.color = reward > 0.5 ? '#000' : '#fff';
+                cell.style.fontSize = '10px';
+                cell.style.display = 'flex';
+                cell.style.alignItems = 'center';
+                cell.style.justifyContent = 'center';
+            } else {
+                cell.classList.add('unrevealed');
             }
             
             cell.addEventListener('click', () => handleCellClick(x, y));
@@ -414,13 +426,24 @@ function getColorForValue(value) {
 // Handle cell click
 function handleCellClick(x, y) {
     try {
-        if (revealed[y][x]) return;
+        if (revealed[y][x]) {
+            // Re-click: sample a new noisy reward from the same cell
+            const reward = game.getReward(x, y, noiseLevel);
+            lastReward = reward;
+            cumulativeReward += reward;
+            clickCount++;
+            cellValues[y][x] = reward;
+            updateStats();
+            renderGrid();
+            return;
+        }
         
-        // Get reward with noise
+        // First click: get reward with noise
         const reward = game.getReward(x, y, noiseLevel);
         
         // Update state
         revealed[y][x] = true;
+        cellValues[y][x] = reward;
         lastReward = reward;
         cumulativeReward += reward;
         clickCount++;
@@ -440,6 +463,10 @@ function updateStats() {
         : '-';
     document.getElementById('cumulativeReward').textContent = cumulativeReward.toFixed(2);
     document.getElementById('clickCount').textContent = clickCount;
+    
+    // Mean reward per click
+    const meanReward = clickCount > 0 ? (cumulativeReward / clickCount).toFixed(3) : '-';
+    document.getElementById('meanReward').textContent = meanReward;
     
     const totalCells = gridSize * gridSize;
     const exploredCells = revealed.flat().filter(r => r).length;

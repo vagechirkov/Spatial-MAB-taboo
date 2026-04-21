@@ -114,7 +114,7 @@ button#newGame:hover {
 .cell {
     width: 100%;
     height: 100%;
-    background: #555;
+    background: #fff;  /* White for unrevealed cells */
     border: none;
     cursor: pointer;
     transition: all 0.15s ease;
@@ -128,7 +128,7 @@ button#newGame:hover {
     transform: scale(1.05);
     z-index: 10;
     box-shadow: 0 0 8px rgba(0, 212, 255, 0.6);
-    background: #666;
+    background: #eee;
 }
 
 .cell.revealed {
