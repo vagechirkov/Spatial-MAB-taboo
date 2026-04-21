@@ -32,18 +32,20 @@ class BatchedSpatialBanditEnv(EnvBase):
     """
     A batched, GPU-native spatial bandit environment built on TorchRL's EnvBase.
     """
-    def __init__(self, gp_bank, dog_bank, num_envs=128, grid_size=33, 
-                 budgets=[25, 50, 100, 200], noise_std=0.01, device='cuda', 
-                 dog_max_range=[1.0, 3.0], fixed_eval_grid=False):
+    def __init__(self, gp_bank, dog_bank, turbulence_bank=None, num_envs=128, grid_size=33, 
+                 budgets=[25, 50, 100, 200], noise_std=0.01, turbulence_scale=0.0,
+                 device='cuda', dog_max_range=[1.0, 3.0], fixed_eval_grid=False):
         
         super().__init__(device=device, batch_size=torch.Size([num_envs]))
         
         self.gp_bank = gp_bank
         self.dog_bank = dog_bank
+        self.turbulence_bank = turbulence_bank
         self.grid_size = grid_size
         self.num_envs = num_envs
         self.budgets_pool = torch.tensor(budgets, device=device, dtype=torch.float32)
         self.noise_std = noise_std
+        self.turbulence_scale = turbulence_scale
         self.dog_max_range = dog_max_range
         self.fixed_eval_grid = fixed_eval_grid
         self.reward_scale = 10.0
@@ -69,6 +71,7 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.current_dog_max = torch.zeros(num_envs, device=device)
         
         self.true_rewards = torch.zeros(num_envs, grid_size, grid_size, device=device)
+        self.current_turbulence_mask = torch.zeros(num_envs, grid_size, grid_size, device=device)
         self.revealed_rewards = torch.zeros(num_envs, grid_size, grid_size, device=device)
         self.visited_mask = torch.zeros(num_envs, grid_size, grid_size, device=device)
         self.cumulative_reward = torch.zeros(num_envs, device=device)
@@ -109,6 +112,10 @@ class BatchedSpatialBanditEnv(EnvBase):
         bank_idx = torch.randint(0, len(self.gp_bank), (n,), device=self.device)
         gp_maps = self.gp_bank[bank_idx].clone()
         dog_maps = self.dog_bank[bank_idx].clone()
+        if self.turbulence_bank is not None:
+            turb_maps = self.turbulence_bank[bank_idx].clone()
+        else:
+            turb_maps = torch.zeros_like(gp_maps)
         
         # Random spatial augmentations
         k_rot = torch.randint(0, 4, (1,), device=self.device).item()
@@ -116,10 +123,12 @@ class BatchedSpatialBanditEnv(EnvBase):
         
         gp_maps = torch.rot90(gp_maps, k=k_rot, dims=[1, 2])
         dog_maps = torch.rot90(dog_maps, k=k_rot, dims=[1, 2])
+        turb_maps = torch.rot90(turb_maps, k=k_rot, dims=[1, 2])
         
         if flip == 1: 
             gp_maps = torch.flip(gp_maps, dims=[2])
             dog_maps = torch.flip(dog_maps, dims=[2])
+            turb_maps = torch.flip(turb_maps, dims=[2])
             
         # Assign budgets and dog_max multiplier
         if self.fixed_eval_grid: 
@@ -137,6 +146,7 @@ class BatchedSpatialBanditEnv(EnvBase):
         # Compute true ground truth landscape
         combined_landscape = gp_maps + dog_maps * dog_max_vals.view(n, 1, 1)
         self.true_rewards[idx] = torch.clamp(combined_landscape, min=0.0)
+        self.current_turbulence_mask[idx] = turb_maps
         
         # Reset tracking variables
         self.revealed_rewards[idx] = 0.0
@@ -176,7 +186,10 @@ class BatchedSpatialBanditEnv(EnvBase):
         
         # Sample noisy reward from ground truth and clamp to local max
         true_r = self.true_rewards[idx, x, y]
-        noisy_r = torch.normal(true_r, self.noise_std, generator=self.rng)
+        local_turb = self.current_turbulence_mask[idx, x, y]
+        
+        dynamic_noise_std = self.noise_std + (local_turb * self.turbulence_scale)
+        noisy_r = torch.normal(true_r, dynamic_noise_std, generator=self.rng)
         clamped_r = torch.min(torch.clamp(noisy_r, min=0.0), self.current_dog_max)
         
         # Update state
@@ -271,7 +284,9 @@ class EfficientSpatialTrunk(nn.Module):
         shift = self.film_shift(scalars_flat).view(-1, 32, 1, 1)
         
         # 3. Modulate (FiLM)
-        out_flat = (x_flat * scale) + shift
+        # out_flat = (x_flat * scale) + shift
+        # Memory-efficient. Creates the scaled tensor, then adds shift in-place
+        out_flat = x_flat.mul(scale).add_(shift)
         
         # 4. Unflatten to original batch dims
         return out_flat.view(*batch_dims, 32, H, W)
@@ -338,7 +353,8 @@ class CriticHead(nn.Module):
 
 
 def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 100, 150, 200], 
-                 length_scale=4.0, dog_max_range=[1.0, 3.0], total_timesteps=100_000_000):
+                 length_scale=4.0, dog_max_range=[1.0, 3.0], total_timesteps=100_000_000,
+                 turbulence_scale=0.0, valley_gradient_mag=0.0, noise_std=0.01):
     
     # 0. Hyperparameter Configuration
     config = {
@@ -363,28 +379,37 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         "lmbda": 0.95,
         "trunk_type": "EfficientSpatialTrunk",
         "reward_scale": 10.0,
-        "noise_std": 0.01,
+        "noise_std": noise_std,
+        "turbulence_scale": turbulence_scale,
+        "valley_gradient_mag": valley_gradient_mag,
         "regen_freq": 250_000,
     }
 
     # 1. Environment Initialization
-    train_gp_bank, train_dog_bank = generate_correlated_dog_bank_split(
-        10_000, config["grid_size"], length_scale=config["length_scale"], device=config["device"]
+    train_gp_bank, train_dog_bank, train_turb_bank = generate_correlated_dog_bank_split(
+        10_000, config["grid_size"], length_scale=config["length_scale"], 
+        valley_gradient_mag=config["valley_gradient_mag"], device=config["device"]
     )
     train_env = BatchedSpatialBanditEnv(
-        train_gp_bank, train_dog_bank, num_envs=config["num_envs"], 
+        train_gp_bank, train_dog_bank, turbulence_bank=train_turb_bank,
+        num_envs=config["num_envs"], 
         grid_size=config["grid_size"], budgets=config["budgets"], 
         dog_max_range=config["dog_max_range"], 
-        noise_std=config["noise_std"], device=config["device"]
+        noise_std=config["noise_std"], 
+        turbulence_scale=config["turbulence_scale"],
+        device=config["device"]
     )
     
-    eval_gp_bank, eval_dog_bank = generate_correlated_dog_bank_split(
-        300, config["grid_size"], length_scale=config["length_scale"], device=config["device"]
+    eval_gp_bank, eval_dog_bank, eval_turb_bank = generate_correlated_dog_bank_split(
+        300, config["grid_size"], length_scale=config["length_scale"], 
+        valley_gradient_mag=config["valley_gradient_mag"], device=config["device"]
     )
     eval_env = BatchedSpatialBanditEnv(
-        eval_gp_bank, eval_dog_bank, num_envs=8192, 
+        eval_gp_bank, eval_dog_bank, turbulence_bank=eval_turb_bank,
+        num_envs=8192, 
         grid_size=config["grid_size"], budgets=config["budgets"], 
         dog_max_range=config["dog_max_range"], 
+        turbulence_scale=config["turbulence_scale"],
         device=config["device"], fixed_eval_grid=True
     )
 
@@ -526,9 +551,13 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         replay_buffer.empty()
         
         if total_frames - last_regen >= config["regen_freq"]:
-            train_env.gp_bank, train_env.dog_bank = generate_correlated_dog_bank_split(
-                10_000, config["grid_size"], length_scale=config["length_scale"], device=config["device"]
+            train_gp_bank, train_dog_bank, train_turb_bank = generate_correlated_dog_bank_split(
+                10_000, config["grid_size"], length_scale=config["length_scale"], 
+                valley_gradient_mag=config["valley_gradient_mag"], device=config["device"]
             )
+            train_env.gp_bank = train_gp_bank
+            train_env.dog_bank = train_dog_bank
+            train_env.turbulence_bank = train_turb_bank
             last_regen = total_frames
 
             torch.cuda.empty_cache()
@@ -557,6 +586,9 @@ if __name__ == "__main__":
         help="Range [low, high] for DoG peak multiplier"
     )
     parser.add_argument("--total_timesteps", type=int, default=100_000_000)
+    parser.add_argument("--turbulence_scale", type=float, default=0.0)
+    parser.add_argument("--valley_gradient_mag", type=float, default=0.0)
+    parser.add_argument("--noise_std", type=float, default=0.01)
     args = parser.parse_args()
     
     run_training(
@@ -566,4 +598,7 @@ if __name__ == "__main__":
         length_scale=args.length_scale,
         dog_max_range=args.dog_max_range,
         total_timesteps=args.total_timesteps,
+        turbulence_scale=args.turbulence_scale,
+        valley_gradient_mag=args.valley_gradient_mag,
+        noise_std=args.noise_std,
     )

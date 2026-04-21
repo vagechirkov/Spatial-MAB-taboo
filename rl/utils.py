@@ -187,6 +187,42 @@ def generate_correlated_dog_bank(
     return grids.float()
 
 
+def apply_valley_gradient(raw_dog, dog_inner, dog_outer, rows_g, cols_g, rows_min, cols_min, gradient_magnitude):
+    """Applies a purely positive, randomized linear gradient across the entire landscape 
+        to naturally lift flat zero-clamped regions."""
+    num_envs = raw_dog.shape[0]
+    device = raw_dog.device
+    
+    # 1. Create a linear plane in a random direction across the whole grid
+    theta = torch.rand(num_envs, 1, 1, device=device) * 2.0 * math.pi
+    plane = cols_g * torch.cos(theta) + rows_g * torch.sin(theta)
+    
+    # 2. Shift the plane so it is strictly >= 0 across the board, then scale
+    global_min = plane.view(num_envs, -1).min(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
+    positive_plane = (plane - global_min) * gradient_magnitude
+    
+    # 3. Add the sloped floor to the ENTIRE landscape
+    return raw_dog + positive_plane
+
+
+def calculate_spatial_turbulence_mask(r2, peak_safe_radius=1.5, moat_width=6.0, fade_width=3.0):
+    """Generates a spatial turbulence ring based on exact physical grid cell distance.
+    Guarantees 0.0 at the exact peak, a broad plateau of 1.0 for 'moat_width' cells, 
+    and a smooth fade out to avoid detectable spatial artifacts."""
+    
+    # Convert squared distance to raw cell distance
+    r = torch.sqrt(r2 + 1e-8)
+    
+    # 1. Protect the exact peak: Smooth rise from 0 to 1
+    rise = torch.clamp(r / peak_safe_radius, 0.0, 1.0)
+    
+    # 2. The Broad Moat & Fade Out
+    outer_start = peak_safe_radius + moat_width
+    fall = 1.0 - torch.clamp((r - outer_start) / fade_width, 0.0, 1.0)
+    
+    return rise * fall
+
+
 def generate_correlated_dog_bank_split(
     num_envs,
     grid_size=33,
@@ -194,9 +230,10 @@ def generate_correlated_dog_bank_split(
     sigma_inner=None,
     sigma_outer=None,
     seed=None,
+    valley_gradient_mag=0.0,
     device='cuda',
 ):
-    """Generate separate GP and DoG components for per-env dog_max scaling.
+    """Generate separate GP, DoG, and Turbulence components for per-env dog_max scaling.
     """
     print(f"Generating split memory bank of {num_envs} correlated-DoG maps on {device}...")
     if seed is not None:
@@ -246,7 +283,21 @@ def generate_correlated_dog_bank_split(
     dog_outer = torch.exp(-r2 / (2.0 * float(sigma_outer)**2)) * (float(sigma_inner) / float(sigma_outer))
     raw_dog = dog_inner - dog_outer
 
-    # Normalize positive peak to 1.0 (per-map), keep negatives as-is
+# 4. Spatial Turbulence Mask (Controls width purely by grid cells)
+    # Using 6.0 for the moat_width gives you the ~6 cell broad zone you requested.
+    turbulence_mask_bank = calculate_spatial_turbulence_mask(
+        r2, peak_safe_radius=2, moat_width=6.0, fade_width=4.0
+    )
+
+    # 5. Randomized Valley Gradient (Optional) to hide flat zero-regions
+    if valley_gradient_mag > 0:
+        raw_dog = apply_valley_gradient(
+            raw_dog, dog_inner, dog_outer, 
+            rows_g, cols_g, rows_min, cols_min, 
+            valley_gradient_mag
+        )
+
+    # 6. Final Normalization for the actual environment dog_bank
     raw_dog_flat = raw_dog.view(num_envs, -1)
     dog_max_raw = raw_dog_flat.max(dim=1, keepdim=True)[0].view(num_envs, 1, 1)
     dog_bank = torch.where(
@@ -255,7 +306,7 @@ def generate_correlated_dog_bank_split(
         raw_dog
     ).float()
 
-    return gp_bank, dog_bank
+    return gp_bank, dog_bank, turbulence_mask_bank
 
 
 class WandbEvalCallback:
@@ -528,5 +579,104 @@ def visualize_dog_max_scaling(
     print(f"\nComparison plot saved to: {os.path.abspath(save_path)}")
 
 
+def visualize_features(
+    grid_size=33, 
+    valley_gradient_mag=0.05, 
+    turbulence_scale=0.1, 
+    dog_max=2.0,
+    seed=42,
+    device='cpu'
+):
+    print(f"Generating full environment visualization (Seed: {seed}, Valley Grad: {valley_gradient_mag}, Turb: {turbulence_scale})...")
+    
+    # 1. Generate banks
+    gp_bank, dog_bank, turb_bank = generate_correlated_dog_bank_split(
+        num_envs=1,
+        grid_size=grid_size,
+        length_scale=4.0, 
+        valley_gradient_mag=valley_gradient_mag,
+        seed=seed,
+        device=device
+    )
+    
+    gp = gp_bank[0].cpu()
+    dog = dog_bank[0].cpu()
+    turb = turb_bank[0].cpu()
+    
+    # 2. Combine to get true reward surface
+    true_reward = torch.clamp(gp + dog * dog_max, min=0.0)
+    
+    # 3. Calculate noise std dev (Variance Heatmap)
+    base_noise = 0.01
+    noise_std = base_noise + turb * turbulence_scale
+    
+    # Convert to numpy for plotting
+    gp_np = gp.numpy()
+    dog_np = dog.numpy()
+    true_reward_np = true_reward.numpy()
+    turb_np = turb.numpy()
+    noise_std_np = noise_std.numpy()
+    
+    # 4. Plotting
+    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    
+    # Row 1: The Components
+    # A. GP Bank
+    im0 = axes[0, 0].imshow(gp_np, origin='lower', cmap='viridis')
+    axes[0, 0].set_title("1. GP Bank Map", fontsize=14)
+    fig.colorbar(im0, ax=axes[0, 0])
+    
+    # B. DoG Bank (includes Valley Gradient)
+    im1 = axes[0, 1].imshow(dog_np, origin='lower', cmap='viridis')
+    axes[0, 1].set_title(f"2. DoG Bank Map (Grad={valley_gradient_mag})", fontsize=14)
+    fig.colorbar(im1, ax=axes[0, 1])
+    
+    # C. Final True Reward
+    im2 = axes[0, 2].imshow(true_reward_np, origin='lower', cmap='viridis')
+    axes[0, 2].set_title(f"3. Final Reward (GP + {dog_max}*DoG)", fontsize=14)
+    fig.colorbar(im2, ax=axes[0, 2])
+    
+    # Row 2: Noise & Profile
+    # D. Turbulence Mask
+    im3 = axes[1, 0].imshow(turb_np, origin='lower', cmap='plasma')
+    axes[1, 0].set_title("4. Turbulence Mask", fontsize=14)
+    fig.colorbar(im3, ax=axes[1, 0])
+    
+    # E. Variance Heatmap (Noise Std Dev)
+    im4 = axes[1, 1].imshow(noise_std_np, origin='lower', cmap='magma')
+    axes[1, 1].set_title(f"5. Variance Heatmap (Scale={turbulence_scale})", fontsize=14)
+    fig.colorbar(im4, ax=axes[1, 1])
+    
+    # F. 1D Cross-section
+    peak_idx = torch.argmax(dog.view(-1))
+    px, py = peak_idx // grid_size, peak_idx % grid_size
+    slice_reward = true_reward_np[px, :]
+    slice_noise = noise_std_np[px, :]
+    
+    ax5 = axes[1, 2]
+    ax5_twin = ax5.twinx()
+    p1, = ax5.plot(slice_reward, label='True Reward', color='blue', linewidth=2.5)
+    p2, = ax5_twin.plot(slice_noise, label='Noise Std Dev', color='red', linestyle='--', linewidth=2.5)
+    
+    ax5.set_xlabel("Grid X (slice through peak)", fontsize=12)
+    ax5.set_ylabel("Reward Value", fontsize=12)
+    ax5_twin.set_ylabel("Noise Std Dev", fontsize=12)
+    ax5_twin.set_ylim(0, max(0.1, noise_std_np.max() * 1.2))
+    ax5.set_title("6. Cross-section Profile", fontsize=14)
+    ax5.legend(handles=[p1, p2], loc='upper right', fontsize=10)
+    ax5.grid(alpha=0.3)
+    
+    plt.suptitle(f"Environment Features: Gradient={valley_gradient_mag}, Turbulence Scale={turbulence_scale}", fontsize=18)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    
+    save_path = "feature_visualization.png"
+    plt.savefig(save_path)
+    print(f"Feature visualization saved to: {os.path.abspath(save_path)}")
+
+
 if __name__ == "__main__":
-    visualize_dog_max_scaling(length_scale=4.0)
+    # print("--- Running Dog Max Scaling Visualization ---")
+    # visualize_dog_max_scaling(length_scale=4.0)
+    
+    print("\n--- Running Dog Refinement Visualization ---")
+    visualize_features(grid_size=33, valley_gradient_mag=0.001, turbulence_scale=0.2)

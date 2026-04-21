@@ -33,3 +33,12 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["abm*", "rl*"]
+
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
