@@ -95,6 +95,11 @@ class GPEnvironment {
     sampleGP() {
         const n = this.gridSize * this.gridSize;
         
+        // For large grids, use a simpler approximation
+        if (n > 400) {
+            return this.sampleGPSimple();
+        }
+        
         // Build covariance matrix
         const K = this.buildCovarianceMatrix();
         
@@ -126,6 +131,49 @@ class GPEnvironment {
         }
         
         return grid;
+    }
+
+    // Simpler GP sampling for large grids (using spatial smoothing)
+    sampleGPSimple() {
+        const grid = new Array(this.gridSize);
+        
+        // Generate white noise
+        for (let i = 0; i < this.gridSize; i++) {
+            grid[i] = new Array(this.gridSize);
+            for (let j = 0; j < this.gridSize; j++) {
+                grid[i][j] = this.randomNormal();
+            }
+        }
+        
+        // Apply spatial smoothing to create correlation
+        const smoothed = new Array(this.gridSize);
+        const kernelRadius = Math.max(1, Math.floor(this.lengthScale / 2));
+        
+        for (let i = 0; i < this.gridSize; i++) {
+            smoothed[i] = new Array(this.gridSize);
+            for (let j = 0; j < this.gridSize; j++) {
+                let sum = 0;
+                let weightSum = 0;
+                
+                for (let di = -kernelRadius; di <= kernelRadius; di++) {
+                    for (let dj = -kernelRadius; dj <= kernelRadius; dj++) {
+                        const ni = i + di;
+                        const nj = j + dj;
+                        
+                        if (ni >= 0 && ni < this.gridSize && nj >= 0 && nj < this.gridSize) {
+                            const dist = Math.sqrt(di * di + dj * dj);
+                            const weight = Math.exp(-dist * dist / (2 * this.lengthScale * this.lengthScale));
+                            sum += grid[ni][nj] * weight;
+                            weightSum += weight;
+                        }
+                    }
+                }
+                
+                smoothed[i][j] = sum / weightSum;
+            }
+        }
+        
+        return smoothed;
     }
 
     // DoG (Difference of Gaussians) kernel
@@ -186,12 +234,16 @@ class GPEnvironment {
 
     // Generate the correlated dog environment
     generate() {
+        console.log('Generating environment with gridSize:', this.gridSize, 'lengthScale:', this.lengthScale);
+        
         // Sample GP
         const gp = this.sampleGP();
+        console.log('GP sampled, min value:', Math.min(...gp.flat()));
         
         // Find minimum coordinates
         const minInfo = this.findMinCoords(gp);
         this.minCoords = { x: minInfo.x, y: minInfo.y };
+        console.log('Min coords:', this.minCoords);
         
         // Create DoG centered at minimum
         const sigmaOuter = this.lengthScale;
@@ -244,6 +296,10 @@ class GPEnvironment {
         }
         
         this.rewardMap = this.normalizeGrid(combined);
+        console.log('Environment generated, reward range:', 
+            Math.min(...this.rewardMap.flat()).toFixed(3), 
+            'to', 
+            Math.max(...this.rewardMap.flat()).toFixed(3));
         return this.rewardMap;
     }
 
@@ -271,29 +327,43 @@ let clickCount = 0;
 
 // Initialize game
 function initGame() {
-    game = new GPEnvironment(gridSize, lengthScale, Date.now());
-    game.generate();
-    
-    // Reset state
-    revealed = Array(gridSize).fill(null).map(() => Array(gridSize).fill(false));
-    lastReward = null;
-    cumulativeReward = 0;
-    clickCount = 0;
-    
-    // Update UI
-    updateStats();
-    renderGrid();
+    try {
+        game = new GPEnvironment(gridSize, lengthScale, Date.now());
+        game.generate();
+        
+        // Reset state
+        revealed = Array(gridSize).fill(null).map(() => Array(gridSize).fill(false));
+        lastReward = null;
+        cumulativeReward = 0;
+        clickCount = 0;
+        
+        // Update UI
+        updateStats();
+        renderGrid();
+        console.log('Game initialized successfully');
+    } catch (e) {
+        console.error('Error initializing game:', e);
+        alert('Error initializing game: ' + e.message);
+    }
 }
 
 // Render the grid
 function renderGrid() {
+    console.log('Rendering grid, size:', gridSize);
     const gridEl = document.getElementById('grid');
     gridEl.innerHTML = '';
-    gridEl.style.gridTemplateColumns = `repeat(${gridSize}, 1fr)`;
+    
+    // Calculate cell size based on grid size (fixed container size)
+    const containerSize = 400;
+    const cellSize = Math.floor(containerSize / gridSize) - 1;
+    
+    gridEl.style.gridTemplateColumns = `repeat(${gridSize}, ${cellSize}px)`;
+    gridEl.style.width = `${gridSize * (cellSize + 1)}px`;
+    gridEl.style.height = `${gridSize * (cellSize + 1)}px`;
     
     for (let y = 0; y < gridSize; y++) {
         for (let x = 0; x < gridSize; x++) {
-            const cell = document.createElement('button');
+            const cell = document.createElement('div');
             cell.className = 'cell';
             cell.dataset.x = x;
             cell.dataset.y = y;
@@ -308,6 +378,7 @@ function renderGrid() {
             gridEl.appendChild(cell);
         }
     }
+    console.log('Grid rendered, cells:', gridSize * gridSize);
 }
 
 // Get color for reward value
@@ -342,20 +413,24 @@ function getColorForValue(value) {
 
 // Handle cell click
 function handleCellClick(x, y) {
-    if (revealed[y][x]) return;
-    
-    // Get reward with noise
-    const reward = game.getReward(x, y, noiseLevel);
-    
-    // Update state
-    revealed[y][x] = true;
-    lastReward = reward;
-    cumulativeReward += reward;
-    clickCount++;
-    
-    // Update UI
-    updateStats();
-    renderGrid();
+    try {
+        if (revealed[y][x]) return;
+        
+        // Get reward with noise
+        const reward = game.getReward(x, y, noiseLevel);
+        
+        // Update state
+        revealed[y][x] = true;
+        lastReward = reward;
+        cumulativeReward += reward;
+        clickCount++;
+        
+        // Update UI
+        updateStats();
+        renderGrid();
+    } catch (e) {
+        console.error('Error handling click:', e);
+    }
 }
 
 // Update statistics display
@@ -376,6 +451,7 @@ function updateStats() {
 document.getElementById('gridSize').addEventListener('input', (e) => {
     gridSize = parseInt(e.target.value);
     document.getElementById('gridSizeValue').textContent = gridSize;
+    initGame();
 });
 
 document.getElementById('lengthScale').addEventListener('input', (e) => {
@@ -388,7 +464,11 @@ document.getElementById('noiseLevel').addEventListener('input', (e) => {
     document.getElementById('noiseLevelValue').textContent = noiseLevel;
 });
 
-document.getElementById('newGame').addEventListener('click', initGame);
+document.getElementById('newGame').addEventListener('click', () => {
+    console.log('New game button clicked');
+    initGame();
+});
 
 // Initialize on load
-initGame();
+console.log('App initializing...');
+window.addEventListener('load', initGame);
