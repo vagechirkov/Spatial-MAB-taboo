@@ -97,7 +97,7 @@ class GPEnvironment {
         
         // For large grids, use a simpler approximation
         if (n > 400) {
-            return this.sampleGPSimple();
+            return this.normalizeGrid(this.sampleGPSimple());
         }
         
         // Build covariance matrix
@@ -121,7 +121,7 @@ class GPEnvironment {
             }
         }
         
-        // Reshape to 2D grid
+        // Reshape to 2D grid and normalize to [0,1]
         const grid = new Array(this.gridSize);
         for (let i = 0; i < this.gridSize; i++) {
             grid[i] = new Array(this.gridSize);
@@ -130,7 +130,7 @@ class GPEnvironment {
             }
         }
         
-        return grid;
+        return this.normalizeGrid(grid);
     }
 
     // Simpler GP sampling for large grids (using spatial smoothing)
@@ -234,22 +234,31 @@ class GPEnvironment {
     }
 
     // Generate the correlated dog environment
+    // Follows Python's make_correlated_dog logic:
+    // 1. Sample GP landscape
+    // 2. Find global minimum of GP
+    // 3. Add DoG centered at GP minimum (creates peak at that location)
+    // 4. Normalize so DoG center = 1, original GP max ~0.7
     generate() {
         console.log('Generating environment with gridSize:', this.gridSize, 'lengthScale:', this.lengthScale);
         
-        // Sample GP
+        // Step 1: Sample GP (normalized to [0,1] internally)
         const gp = this.sampleGP();
-        console.log('GP sampled, min value:', Math.min(...gp.flat()));
+        console.log('GP sampled, range:', 
+            Math.min(...gp.flat()).toFixed(3), 'to', 
+            Math.max(...gp.flat()).toFixed(3));
         
-        // Find minimum coordinates
+        // Step 2: Find global minimum of GP (this will become the peak after DoG)
         const minInfo = this.findMinCoords(gp);
         this.minCoords = { x: minInfo.x, y: minInfo.y };
-        console.log('Min coords:', this.minCoords);
+        console.log('GP min coords:', this.minCoords, 'value:', minInfo.value.toFixed(3));
         
-        // Create DoG centered at minimum
+        // Step 3: Create DoG centered at GP minimum
+        // sigma_outer = length_scale, sigma_inner = length_scale / 2
         const sigmaOuter = this.lengthScale;
         const sigmaInner = sigmaOuter / 2.0;
         
+        // Generate DoG pattern (unnormalized)
         const dog = new Array(this.gridSize);
         for (let i = 0; i < this.gridSize; i++) {
             dog[i] = new Array(this.gridSize);
@@ -258,21 +267,22 @@ class GPEnvironment {
             }
         }
         
-        // Scale DoG peak
-        let dogMax = 0;
+        // Scale DoG peak to dog_max (1.2) - this makes the center higher than GP max
+        let dogMaxAbs = 0;
         for (let i = 0; i < dog.length; i++) {
             for (let j = 0; j < dog[i].length; j++) {
-                dogMax = Math.max(dogMax, Math.abs(dog[i][j]));
+                dogMaxAbs = Math.max(dogMaxAbs, Math.abs(dog[i][j]));
             }
         }
         
+        const dogMax = 1.2;  // Same as Python
         for (let i = 0; i < dog.length; i++) {
             for (let j = 0; j < dog[i].length; j++) {
-                dog[i][j] = (dog[i][j] / dogMax) * 1.2;
+                dog[i][j] = (dog[i][j] / dogMaxAbs) * dogMax;
             }
         }
         
-        // Center around zero mean
+        // Center around zero mean (like Python)
         let dogSum = 0;
         for (let i = 0; i < dog.length; i++) {
             for (let j = 0; j < dog[i].length; j++) {
@@ -287,7 +297,13 @@ class GPEnvironment {
             }
         }
         
-        // Combine GP + DoG and normalize
+        console.log('DoG range after scaling:', 
+            Math.min(...dog.flat()).toFixed(3), 'to', 
+            Math.max(...dog.flat()).toFixed(3));
+        
+        // Step 4: Combine GP + DoG and normalize to [0,1]
+        // The DoG center (at GP min) becomes the peak (1)
+        // The original GP max becomes ~0.7
         const combined = new Array(this.gridSize);
         for (let i = 0; i < this.gridSize; i++) {
             combined[i] = new Array(this.gridSize);
@@ -297,10 +313,15 @@ class GPEnvironment {
         }
         
         this.rewardMap = this.normalizeGrid(combined);
-        console.log('Environment generated, reward range:', 
-            Math.min(...this.rewardMap.flat()).toFixed(3), 
-            'to', 
+        
+        // Verify: the DoG center location should now have reward = 1
+        const centerReward = this.rewardMap[this.minCoords.y][this.minCoords.x];
+        console.log('Environment generated:');
+        console.log('  DoG center (original GP min) reward:', centerReward.toFixed(3));
+        console.log('  Reward range:', 
+            Math.min(...this.rewardMap.flat()).toFixed(3), 'to', 
             Math.max(...this.rewardMap.flat()).toFixed(3));
+        
         return this.rewardMap;
     }
 
@@ -356,9 +377,8 @@ function renderGrid() {
     const gridEl = document.getElementById('grid');
     gridEl.innerHTML = '';
     
-    // Calculate cell size based on grid size (fixed container size)
-    const containerSize = 400;
-    const cellSize = Math.floor(containerSize / gridSize) - 1;
+    // Use fixed cell size, let grid overflow if needed
+    const cellSize = 12;
     
     gridEl.style.gridTemplateColumns = `repeat(${gridSize}, ${cellSize}px)`;
     gridEl.style.width = `${gridSize * (cellSize + 1)}px`;
@@ -378,10 +398,6 @@ function renderGrid() {
                 // Display the observed value inside the cell
                 cell.textContent = reward.toFixed(2);
                 cell.style.color = reward > 0.5 ? '#000' : '#fff';
-                cell.style.fontSize = '10px';
-                cell.style.display = 'flex';
-                cell.style.alignItems = 'center';
-                cell.style.justifyContent = 'center';
             } else {
                 cell.classList.add('unrevealed');
             }
