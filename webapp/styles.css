@@ -100,8 +100,8 @@ button#newGame:hover {
     display: flex;
     justify-content: center;
     align-items: center;
-    min-width: 500px;
-    min-height: 500px;
+    min-width: 700px;
+    min-height: 700px;
 }
 
 .grid {
@@ -114,8 +114,8 @@ button#newGame:hover {
 }
 
 .cell {
-    width: 12px;
-    height: 12px;
+    width: 18px;
+    height: 18px;
     background: #fff;  /* White for unrevealed cells */
     border: none;
     cursor: pointer;
