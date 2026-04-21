@@ -377,8 +377,9 @@ function renderGrid() {
     const gridEl = document.getElementById('grid');
     gridEl.innerHTML = '';
     
-    // Use fixed cell size matching CSS
-    const cellSize = 18;
+    // Calculate cell size to maintain consistent grid physical size (~600px)
+    const targetGridSize = 600;
+    const cellSize = Math.floor(targetGridSize / gridSize);
     
     gridEl.style.gridTemplateColumns = `repeat(${gridSize}, ${cellSize}px)`;
     gridEl.style.width = `${gridSize * (cellSize + 1)}px`;

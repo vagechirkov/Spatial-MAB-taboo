@@ -114,8 +114,6 @@ button#newGame:hover {
 }
 
 .cell {
-    width: 18px;
-    height: 18px;
     background: #fff;  /* White for unrevealed cells */
     border: none;
     cursor: pointer;
@@ -125,9 +123,9 @@ button#newGame:hover {
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 8px;
     font-weight: bold;
     overflow: hidden;
+    font-size: 10px;
 }
 
 .cell:hover {
