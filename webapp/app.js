@@ -1,0 +1,394 @@
+// Spatial Multi-Armed Bandit Web App
+// Implements make_correlated_dog reward landscape generation
+
+class GPEnvironment {
+    constructor(gridSize, lengthScale, seed = null) {
+        this.gridSize = gridSize;
+        this.lengthScale = lengthScale;
+        this.rng = seed ? this.seededRandom(seed) : Math.random;
+        this.rewardMap = null;
+        this.minCoords = null;
+    }
+
+    // Simple seeded random number generator (Mulberry32)
+    seededRandom(seed) {
+        return function() {
+            let t = seed += 0x6D2B79F5;
+            t = Math.imul(t ^ t >>> 15, t | 1);
+            t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+            return ((t ^ t >>> 14) >>> 0) / 4294967296;
+        };
+    }
+
+    // Box-Muller transform for normal distribution
+    randomNormal() {
+        let u = 0, v = 0;
+        while (u === 0) u = this.rng();
+        while (v === 0) v = this.rng();
+        return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+    }
+
+    // RBF kernel function
+    rbfKernel(x1, y1, x2, y2) {
+        const dx = x1 - x2;
+        const dy = y1 - y2;
+        const distSq = dx * dx + dy * dy;
+        return Math.exp(-distSq / (2 * this.lengthScale * this.lengthScale));
+    }
+
+    // Generate covariance matrix using RBF kernel
+    buildCovarianceMatrix() {
+        const n = this.gridSize * this.gridSize;
+        const K = new Array(n);
+        
+        for (let i = 0; i < n; i++) {
+            K[i] = new Array(n);
+            const xi = i % this.gridSize;
+            const yi = Math.floor(i / this.gridSize);
+            
+            for (let j = 0; j < n; j++) {
+                const xj = j % this.gridSize;
+                const yj = Math.floor(j / this.gridSize);
+                
+                if (i === j) {
+                    K[i][j] = 1.0 + 1e-6; // Add small jitter for numerical stability
+                } else {
+                    K[i][j] = this.rbfKernel(xi, yi, xj, yj);
+                }
+            }
+        }
+        
+        return K;
+    }
+
+    // Cholesky decomposition
+    cholesky(matrix) {
+        const n = matrix.length;
+        const L = new Array(n);
+        
+        for (let i = 0; i < n; i++) {
+            L[i] = new Array(n).fill(0);
+        }
+        
+        for (let i = 0; i < n; i++) {
+            for (let j = 0; j <= i; j++) {
+                let sum = 0;
+                
+                if (j === i) {
+                    for (let k = 0; k < j; k++) {
+                        sum += L[j][k] * L[j][k];
+                    }
+                    L[i][j] = Math.sqrt(Math.max(matrix[i][i] - sum, 1e-10));
+                } else {
+                    for (let k = 0; k < j; k++) {
+                        sum += L[i][k] * L[j][k];
+                    }
+                    L[i][j] = (matrix[i][j] - sum) / L[j][j];
+                }
+            }
+        }
+        
+        return L;
+    }
+
+    // Generate GP sample using Cholesky
+    sampleGP() {
+        const n = this.gridSize * this.gridSize;
+        
+        // Build covariance matrix
+        const K = this.buildCovarianceMatrix();
+        
+        // Cholesky decomposition
+        const L = this.cholesky(K);
+        
+        // Generate standard normal samples
+        const z = new Array(n);
+        for (let i = 0; i < n; i++) {
+            z[i] = this.randomNormal();
+        }
+        
+        // Multiply by Cholesky factor
+        const sample = new Array(n);
+        for (let i = 0; i < n; i++) {
+            sample[i] = 0;
+            for (let j = 0; j <= i; j++) {
+                sample[i] += L[i][j] * z[j];
+            }
+        }
+        
+        // Reshape to 2D grid
+        const grid = new Array(this.gridSize);
+        for (let i = 0; i < this.gridSize; i++) {
+            grid[i] = new Array(this.gridSize);
+            for (let j = 0; j < this.gridSize; j++) {
+                grid[i][j] = sample[i * this.gridSize + j];
+            }
+        }
+        
+        return grid;
+    }
+
+    // DoG (Difference of Gaussians) kernel
+    dogKernel(x, y, centerX, centerY, sigmaInner, sigmaOuter) {
+        const dx = x - centerX;
+        const dy = y - centerY;
+        const r2 = dx * dx + dy * dy;
+        
+        const inner = Math.exp(-r2 / (2 * sigmaInner * sigmaInner));
+        const outer = Math.exp(-r2 / (2 * sigmaOuter * sigmaOuter)) * (sigmaInner / sigmaOuter);
+        
+        return inner - outer;
+    }
+
+    // Find minimum coordinates in a grid
+    findMinCoords(grid) {
+        let minVal = Infinity;
+        let minX = 0, minY = 0;
+        
+        for (let i = 0; i < grid.length; i++) {
+            for (let j = 0; j < grid[i].length; j++) {
+                if (grid[i][j] < minVal) {
+                    minVal = grid[i][j];
+                    minX = j;
+                    minY = i;
+                }
+            }
+        }
+        
+        return { x: minX, y: minY, value: minVal };
+    }
+
+    // Min-max normalization
+    normalizeGrid(grid) {
+        let minVal = Infinity;
+        let maxVal = -Infinity;
+        
+        for (let i = 0; i < grid.length; i++) {
+            for (let j = 0; j < grid[i].length; j++) {
+                minVal = Math.min(minVal, grid[i][j]);
+                maxVal = Math.max(maxVal, grid[i][j]);
+            }
+        }
+        
+        const range = maxVal - minVal;
+        if (range === 0) return grid;
+        
+        const normalized = new Array(grid.length);
+        for (let i = 0; i < grid.length; i++) {
+            normalized[i] = new Array(grid[i].length);
+            for (let j = 0; j < grid[i].length; j++) {
+                normalized[i][j] = (grid[i][j] - minVal) / range;
+            }
+        }
+        
+        return normalized;
+    }
+
+    // Generate the correlated dog environment
+    generate() {
+        // Sample GP
+        const gp = this.sampleGP();
+        
+        // Find minimum coordinates
+        const minInfo = this.findMinCoords(gp);
+        this.minCoords = { x: minInfo.x, y: minInfo.y };
+        
+        // Create DoG centered at minimum
+        const sigmaOuter = this.lengthScale;
+        const sigmaInner = sigmaOuter / 2.0;
+        
+        const dog = new Array(this.gridSize);
+        for (let i = 0; i < this.gridSize; i++) {
+            dog[i] = new Array(this.gridSize);
+            for (let j = 0; j < this.gridSize; j++) {
+                dog[i][j] = this.dogKernel(j, i, this.minCoords.x, this.minCoords.y, sigmaInner, sigmaOuter);
+            }
+        }
+        
+        // Scale DoG peak
+        let dogMax = 0;
+        for (let i = 0; i < dog.length; i++) {
+            for (let j = 0; j < dog[i].length; j++) {
+                dogMax = Math.max(dogMax, Math.abs(dog[i][j]));
+            }
+        }
+        
+        for (let i = 0; i < dog.length; i++) {
+            for (let j = 0; j < dog[i].length; j++) {
+                dog[i][j] = (dog[i][j] / dogMax) * 1.2;
+            }
+        }
+        
+        // Center around zero mean
+        let dogSum = 0;
+        for (let i = 0; i < dog.length; i++) {
+            for (let j = 0; j < dog[i].length; j++) {
+                dogSum += dog[i][j];
+            }
+        }
+        const dogMean = dogSum / (this.gridSize * this.gridSize);
+        
+        for (let i = 0; i < dog.length; i++) {
+            for (let j = 0; j < dog[i].length; j++) {
+                dog[i][j] -= dogMean;
+            }
+        }
+        
+        // Combine GP + DoG and normalize
+        const combined = new Array(this.gridSize);
+        for (let i = 0; i < this.gridSize; i++) {
+            combined[i] = new Array(this.gridSize);
+            for (let j = 0; j < this.gridSize; j++) {
+                combined[i][j] = gp[i][j] + dog[i][j];
+            }
+        }
+        
+        this.rewardMap = this.normalizeGrid(combined);
+        return this.rewardMap;
+    }
+
+    // Get reward with observation noise
+    getReward(x, y, noiseLevel) {
+        if (!this.rewardMap || x < 0 || x >= this.gridSize || y < 0 || y >= this.gridSize) {
+            return 0;
+        }
+        
+        const trueReward = this.rewardMap[y][x];
+        const noise = this.randomNormal() * noiseLevel;
+        return Math.max(0, Math.min(1, trueReward + noise));
+    }
+}
+
+// Game state
+let game = null;
+let gridSize = 33;
+let lengthScale = 4.5;
+let noiseLevel = 0.1;
+let revealed = [];
+let lastReward = null;
+let cumulativeReward = 0;
+let clickCount = 0;
+
+// Initialize game
+function initGame() {
+    game = new GPEnvironment(gridSize, lengthScale, Date.now());
+    game.generate();
+    
+    // Reset state
+    revealed = Array(gridSize).fill(null).map(() => Array(gridSize).fill(false));
+    lastReward = null;
+    cumulativeReward = 0;
+    clickCount = 0;
+    
+    // Update UI
+    updateStats();
+    renderGrid();
+}
+
+// Render the grid
+function renderGrid() {
+    const gridEl = document.getElementById('grid');
+    gridEl.innerHTML = '';
+    gridEl.style.gridTemplateColumns = `repeat(${gridSize}, 1fr)`;
+    
+    for (let y = 0; y < gridSize; y++) {
+        for (let x = 0; x < gridSize; x++) {
+            const cell = document.createElement('button');
+            cell.className = 'cell';
+            cell.dataset.x = x;
+            cell.dataset.y = y;
+            
+            if (revealed[y][x]) {
+                cell.classList.add('revealed');
+                const reward = game.getReward(x, y, 0); // Get true value for display
+                cell.style.backgroundColor = getColorForValue(reward);
+            }
+            
+            cell.addEventListener('click', () => handleCellClick(x, y));
+            gridEl.appendChild(cell);
+        }
+    }
+}
+
+// Get color for reward value
+function getColorForValue(value) {
+    // Custom color scale: dark blue -> light blue -> yellow -> gold
+    const colors = [
+        { pos: 0, r: 26, g: 26, b: 46 },
+        { pos: 0.25, r: 45, g: 74, b: 124 },
+        { pos: 0.5, r: 107, g: 140, b: 206 },
+        { pos: 0.75, r: 196, g: 163, b: 90 },
+        { pos: 1, r: 240, g: 192, b: 64 }
+    ];
+    
+    // Find the two colors to interpolate between
+    let c1 = colors[0], c2 = colors[1];
+    for (let i = 0; i < colors.length - 1; i++) {
+        if (value >= colors[i].pos && value <= colors[i + 1].pos) {
+            c1 = colors[i];
+            c2 = colors[i + 1];
+            break;
+        }
+    }
+    
+    // Interpolate
+    const t = (value - c1.pos) / (c2.pos - c1.pos);
+    const r = Math.round(c1.r + t * (c2.r - c1.r));
+    const g = Math.round(c1.g + t * (c2.g - c1.g));
+    const b = Math.round(c1.b + t * (c2.b - c1.b));
+    
+    return `rgb(${r}, ${g}, ${b})`;
+}
+
+// Handle cell click
+function handleCellClick(x, y) {
+    if (revealed[y][x]) return;
+    
+    // Get reward with noise
+    const reward = game.getReward(x, y, noiseLevel);
+    
+    // Update state
+    revealed[y][x] = true;
+    lastReward = reward;
+    cumulativeReward += reward;
+    clickCount++;
+    
+    // Update UI
+    updateStats();
+    renderGrid();
+}
+
+// Update statistics display
+function updateStats() {
+    document.getElementById('lastReward').textContent = lastReward !== null 
+        ? lastReward.toFixed(3) 
+        : '-';
+    document.getElementById('cumulativeReward').textContent = cumulativeReward.toFixed(2);
+    document.getElementById('clickCount').textContent = clickCount;
+    
+    const totalCells = gridSize * gridSize;
+    const exploredCells = revealed.flat().filter(r => r).length;
+    const percent = (exploredCells / totalCells * 100).toFixed(1);
+    document.getElementById('exploredPercent').textContent = percent + '%';
+}
+
+// Event listeners
+document.getElementById('gridSize').addEventListener('input', (e) => {
+    gridSize = parseInt(e.target.value);
+    document.getElementById('gridSizeValue').textContent = gridSize;
+});
+
+document.getElementById('lengthScale').addEventListener('input', (e) => {
+    lengthScale = parseFloat(e.target.value);
+    document.getElementById('lengthScaleValue').textContent = lengthScale;
+});
+
+document.getElementById('noiseLevel').addEventListener('input', (e) => {
+    noiseLevel = parseFloat(e.target.value);
+    document.getElementById('noiseLevelValue').textContent = noiseLevel;
+});
+
+document.getElementById('newGame').addEventListener('click', initGame);
+
+// Initialize on load
+initGame();

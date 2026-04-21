@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spatial Multi-Armed Bandit</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Spatial Multi-Armed Bandit</h1>
+            <p class="subtitle">Click on the grid to explore the reward landscape</p>
+        </header>
+
+        <div class="controls">
+            <div class="control-group">
+                <label for="gridSize">Grid Size:</label>
+                <input type="range" id="gridSize" min="11" max="51" value="33" step="2">
+                <span id="gridSizeValue">33</span>
+            </div>
+            <div class="control-group">
+                <label for="lengthScale">Length Scale:</label>
+                <input type="range" id="lengthScale" min="2" max="15" value="4.5" step="0.5">
+                <span id="lengthScaleValue">4.5</span>
+            </div>
+            <div class="control-group">
+                <label for="noiseLevel">Observation Noise:</label>
+                <input type="range" id="noiseLevel" min="0" max="0.3" value="0.1" step="0.01">
+                <span id="noiseLevelValue">0.1</span>
+            </div>
+            <button id="newGame">New Environment</button>
+        </div>
+
+        <div class="game-area">
+            <div class="grid-container">
+                <div id="grid" class="grid"></div>
+            </div>
+
+            <div class="stats-panel">
+                <div class="stat-box">
+                    <h3>Last Reward</h3>
+                    <div id="lastReward" class="value">-</div>
+                </div>
+                <div class="stat-box">
+                    <h3>Cumulative Reward</h3>
+                    <div id="cumulativeReward" class="value">0</div>
+                </div>
+                <div class="stat-box">
+                    <h3>Clicks</h3>
+                    <div id="clickCount" class="value">0</div>
+                </div>
+                <div class="stat-box">
+                    <h3>Explored</h3>
+                    <div id="exploredPercent" class="value">0%</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="legend">
+            <div class="legend-bar"></div>
+            <div class="legend-labels">
+                <span>0 (Low)</span>
+                <span>0.5</span>
+                <span>1 (High)</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
