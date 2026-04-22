@@ -32,15 +32,17 @@ class BatchedSpatialBanditEnv(EnvBase):
     """
     A batched, GPU-native spatial bandit environment built on TorchRL's EnvBase.
     """
-    def __init__(self, gp_bank, dog_bank, turbulence_bank=None, num_envs=128, grid_size=33, 
+    def __init__(self, gp_bank, dog_bank, turbulence_bank=None, is_dog_bank=None, num_envs=128, grid_size=33, 
                  budgets=[25, 50, 100, 200], noise_std=0.01, turbulence_scale=0.0,
-                 device='cuda', dog_max_range=[1.0, 3.0], fixed_eval_grid=False):
+                 device='cuda', dog_max_range=[1.0, 3.0], fixed_eval_grid=False,
+                 hide_dog_max=False):
         
         super().__init__(device=device, batch_size=torch.Size([num_envs]))
         
         self.gp_bank = gp_bank
         self.dog_bank = dog_bank
         self.turbulence_bank = turbulence_bank
+        self.is_dog_bank = is_dog_bank
         self.grid_size = grid_size
         self.num_envs = num_envs
         self.budgets_pool = torch.tensor(budgets, device=device, dtype=torch.float32)
@@ -48,6 +50,7 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.turbulence_scale = turbulence_scale
         self.dog_max_range = dog_max_range
         self.fixed_eval_grid = fixed_eval_grid
+        self.hide_dog_max = hide_dog_max
         self.reward_scale = 10.0
 
         self.observation_spec = Composite({
@@ -137,6 +140,12 @@ class BatchedSpatialBanditEnv(EnvBase):
         else: 
             lo, hi = self.dog_max_range
             dog_max_vals = torch.rand(n, device=self.device) * (hi - lo) + lo
+            
+            # If we have a bank mask, force dog_max to 1.0 for non-dog samples
+            if self.is_dog_bank is not None:
+                is_dog_sample = self.is_dog_bank[bank_idx]
+                dog_max_vals = torch.where(is_dog_sample, dog_max_vals, torch.ones_like(dog_max_vals))
+            
             budget_idx = torch.randint(0, len(self.budgets_pool), (n,), device=self.device)
             budgets = self.budgets_pool[budget_idx]
             
@@ -164,7 +173,11 @@ class BatchedSpatialBanditEnv(EnvBase):
         max_budget = torch.max(self.budgets_pool).item()
         total_budget_obs = (self.budget / max_budget).unsqueeze(1)
         
-        dog_max_obs = self.current_dog_max.unsqueeze(1)
+        if self.hide_dog_max:
+            dog_max_obs = torch.zeros_like(self.current_dog_max).unsqueeze(1)
+        else:
+            dog_max_obs = self.current_dog_max.unsqueeze(1)
+            
         avg_reward_obs = (self.cumulative_reward / torch.clamp(self.budget, min=1.0)).unsqueeze(1)
         
         return TensorDict({
@@ -353,8 +366,9 @@ class CriticHead(nn.Module):
 
 
 def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 100, 150, 200], 
-                 length_scale=4.0, dog_max_range=[1.0, 3.0], total_timesteps=100_000_000,
-                 turbulence_scale=0.0, valley_gradient_mag=0.0, noise_std=0.01):
+                 length_scale=4.0, dog_max_range=[1.2, 1.8], total_timesteps=100_000_000,
+                 turbulence_scale=0.0, valley_gradient_mag=0.0, noise_std=0.01,
+                 non_dog_fraction=0.0, hide_dog_max=False):
     
     # 0. Hyperparameter Configuration
     config = {
@@ -386,31 +400,36 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
     }
 
     # 1. Environment Initialization
-    train_gp_bank, train_dog_bank, train_turb_bank = generate_correlated_dog_bank_split(
+    train_gp_bank, train_dog_bank, train_turb_bank, train_is_dog_bank = generate_correlated_dog_bank_split(
         10_000, config["grid_size"], length_scale=config["length_scale"], 
-        valley_gradient_mag=config["valley_gradient_mag"], device=config["device"]
+        valley_gradient_mag=config["valley_gradient_mag"], 
+        non_dog_fraction=non_dog_fraction, device=config["device"]
     )
     train_env = BatchedSpatialBanditEnv(
-        train_gp_bank, train_dog_bank, turbulence_bank=train_turb_bank,
+        train_gp_bank, train_dog_bank, turbulence_bank=train_turb_bank, is_dog_bank=train_is_dog_bank,
         num_envs=config["num_envs"], 
         grid_size=config["grid_size"], budgets=config["budgets"], 
         dog_max_range=config["dog_max_range"], 
         noise_std=config["noise_std"], 
         turbulence_scale=config["turbulence_scale"],
-        device=config["device"]
+        device=config["device"],
+        hide_dog_max=hide_dog_max
     )
     
-    eval_gp_bank, eval_dog_bank, eval_turb_bank = generate_correlated_dog_bank_split(
+    # Evaluation Bank: ALWAYS 100% DoG (non_dog_fraction=0.0)
+    eval_gp_bank, eval_dog_bank, eval_turb_bank, eval_is_dog_bank = generate_correlated_dog_bank_split(
         300, config["grid_size"], length_scale=config["length_scale"], 
-        valley_gradient_mag=config["valley_gradient_mag"], device=config["device"]
+        valley_gradient_mag=config["valley_gradient_mag"], 
+        non_dog_fraction=0.0, device=config["device"]
     )
     eval_env = BatchedSpatialBanditEnv(
-        eval_gp_bank, eval_dog_bank, turbulence_bank=eval_turb_bank,
+        eval_gp_bank, eval_dog_bank, turbulence_bank=eval_turb_bank, is_dog_bank=eval_is_dog_bank,
         num_envs=8192, 
         grid_size=config["grid_size"], budgets=config["budgets"], 
         dog_max_range=config["dog_max_range"], 
         turbulence_scale=config["turbulence_scale"],
-        device=config["device"], fixed_eval_grid=True
+        device=config["device"], fixed_eval_grid=True,
+        hide_dog_max=hide_dog_max
     )
 
     # 2. Network Instantiation
@@ -551,13 +570,15 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         replay_buffer.empty()
         
         if total_frames - last_regen >= config["regen_freq"]:
-            train_gp_bank, train_dog_bank, train_turb_bank = generate_correlated_dog_bank_split(
+            train_gp_bank, train_dog_bank, train_turb_bank, train_is_dog_bank = generate_correlated_dog_bank_split(
                 10_000, config["grid_size"], length_scale=config["length_scale"], 
-                valley_gradient_mag=config["valley_gradient_mag"], device=config["device"]
+                valley_gradient_mag=config["valley_gradient_mag"], 
+                non_dog_fraction=non_dog_fraction, device=config["device"]
             )
             train_env.gp_bank = train_gp_bank
             train_env.dog_bank = train_dog_bank
             train_env.turbulence_bank = train_turb_bank
+            train_env.is_dog_bank = train_is_dog_bank
             last_regen = total_frames
 
             torch.cuda.empty_cache()
@@ -589,6 +610,10 @@ if __name__ == "__main__":
     parser.add_argument("--turbulence_scale", type=float, default=0.0)
     parser.add_argument("--valley_gradient_mag", type=float, default=0.0)
     parser.add_argument("--noise_std", type=float, default=0.01)
+    parser.add_argument("--non_dog_fraction", type=float, default=0.0,
+                        help="Fraction of training bank with pure GP maps (no DoG component)")
+    parser.add_argument("--hide_dog_max", action="store_true",
+                        help="If set, dog_max is hidden from agent observations (set to 0.0)")
     args = parser.parse_args()
     
     run_training(
@@ -601,4 +626,6 @@ if __name__ == "__main__":
         turbulence_scale=args.turbulence_scale,
         valley_gradient_mag=args.valley_gradient_mag,
         noise_std=args.noise_std,
+        non_dog_fraction=args.non_dog_fraction,
+        hide_dog_max=args.hide_dog_max,
     )

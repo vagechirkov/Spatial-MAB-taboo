@@ -231,6 +231,7 @@ def generate_correlated_dog_bank_split(
     sigma_outer=None,
     seed=None,
     valley_gradient_mag=0.0,
+    non_dog_fraction=0.0,
     device='cuda',
 ):
     """Generate separate GP, DoG, and Turbulence components for per-env dog_max scaling.
@@ -306,7 +307,16 @@ def generate_correlated_dog_bank_split(
         raw_dog
     ).float()
 
-    return gp_bank, dog_bank, turbulence_mask_bank
+    # 7. Non-DoG Sample Mixing
+    is_dog_bank = torch.ones(num_envs, dtype=torch.bool, device=device)
+    if non_dog_fraction > 0:
+        num_non_dog = int(num_envs * non_dog_fraction)
+        if num_non_dog > 0:
+            is_dog_bank[:num_non_dog] = False
+            dog_bank[:num_non_dog] = 0.0
+
+    return gp_bank, dog_bank, turbulence_mask_bank, is_dog_bank
+
 
 
 class WandbEvalCallback:
