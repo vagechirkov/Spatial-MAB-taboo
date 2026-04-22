@@ -35,7 +35,7 @@ class BatchedSpatialBanditEnv(EnvBase):
     def __init__(self, gp_bank, dog_bank, turbulence_bank=None, is_dog_bank=None, num_envs=128, grid_size=33, 
                  budgets=[25, 50, 100, 200], noise_std=0.01, turbulence_scale=0.0,
                  device='cuda', dog_max_range=[1.0, 3.0], fixed_eval_grid=False,
-                 hide_dog_max=False, hide_time_budget=False):
+                 hide_dog_max=False, hide_time_budget=False, memory_size=None):
         
         super().__init__(device=device, batch_size=torch.Size([num_envs]))
         
@@ -52,7 +52,12 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.fixed_eval_grid = fixed_eval_grid
         self.hide_dog_max = hide_dog_max
         self.hide_time_budget = hide_time_budget
+        self.memory_size = memory_size
         self.reward_scale = 10.0
+        
+        if self.memory_size:
+            self.history_coords = torch.zeros((num_envs, memory_size, 2), dtype=torch.long, device=device)
+            self.history_rewards = torch.zeros((num_envs, memory_size), device=device)
 
         self.observation_spec = Composite({
             "grid": Bounded(0.0, 1.0, shape=(num_envs, 2, grid_size, grid_size), dtype=torch.float32, device=device),
@@ -164,11 +169,38 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.steps_taken[idx] = 0.0
         self.cumulative_reward[idx] = 0.0
         
+        if self.memory_size:
+            self.history_coords[idx] = 0
+            self.history_rewards[idx] = 0.0
+        
         return self._get_obs()
 
     def _get_obs(self):
         """Constructs the observation TensorDict."""
-        grid_obs = torch.stack([self.revealed_rewards, self.visited_mask], dim=1)
+        if self.memory_size:
+            revealed = torch.zeros_like(self.revealed_rewards)
+            visited = torch.zeros_like(self.visited_mask)
+            idx = torch.arange(self.num_envs, device=self.device)
+            
+            # Reconstruct from oldest to newest so newest takes precedence on the same pixel
+            for i in reversed(range(self.memory_size)):
+                target_step = self.steps_taken - 1 - i
+                valid_mask = target_step >= 0
+                if not valid_mask.any(): continue
+                
+                v_idx = idx[valid_mask]
+                h_idx = (target_step[valid_mask] % self.memory_size).long()
+                
+                hx = self.history_coords[v_idx, h_idx, 0]
+                hy = self.history_coords[v_idx, h_idx, 1]
+                hr = self.history_rewards[v_idx, h_idx]
+                
+                visited[v_idx, hx, hy] = 1.0
+                revealed[v_idx, hx, hy] = hr
+            grid_obs = torch.stack([revealed, visited], dim=1)
+        else:
+            grid_obs = torch.stack([self.revealed_rewards, self.visited_mask], dim=1)
+            
         step_fraction_obs = (1.0 - (self.steps_taken / self.budget)).unsqueeze(1)
         
         max_budget = torch.max(self.budgets_pool).item()
@@ -211,6 +243,12 @@ class BatchedSpatialBanditEnv(EnvBase):
         clamped_r = torch.min(torch.clamp(noisy_r, min=0.0), self.current_dog_max)
         
         # Update state
+        if self.memory_size:
+            h_idx = (self.steps_taken % self.memory_size).long()
+            self.history_coords[idx, h_idx, 0] = x
+            self.history_coords[idx, h_idx, 1] = y
+            self.history_rewards[idx, h_idx] = clamped_r
+            
         self.visited_mask[idx, x, y] = 1.0
         self.revealed_rewards[idx, x, y] = clamped_r
         self.steps_taken += 1
@@ -373,7 +411,8 @@ class CriticHead(nn.Module):
 def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 100, 150, 200], 
                  length_scale=4.0, dog_max_range=[1.2, 1.8], total_timesteps=100_000_000,
                  turbulence_scale=0.0, valley_gradient_mag=0.0, noise_std=0.01,
-                 non_dog_fraction=0.0, hide_dog_max=False, hide_time_budget=False):
+                 non_dog_fraction=0.0, hide_dog_max=False, hide_time_budget=False,
+                 memory_size=None):
     
     # 0. Hyperparameter Configuration
     config = {
@@ -403,6 +442,7 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         "valley_gradient_mag": valley_gradient_mag,
         "regen_freq": 250_000,
         "hide_time_budget": hide_time_budget,
+        "memory_size": memory_size,
     }
 
     # 1. Environment Initialization
@@ -420,7 +460,8 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         turbulence_scale=config["turbulence_scale"],
         device=config["device"],
         hide_dog_max=hide_dog_max,
-        hide_time_budget=hide_time_budget
+        hide_time_budget=hide_time_budget,
+        memory_size=memory_size
     )
     
     # Evaluation Bank: ALWAYS 100% DoG (non_dog_fraction=0.0)
@@ -437,7 +478,8 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         turbulence_scale=config["turbulence_scale"],
         device=config["device"], fixed_eval_grid=True,
         hide_dog_max=hide_dog_max,
-        hide_time_budget=hide_time_budget
+        hide_time_budget=hide_time_budget,
+        memory_size=memory_size
     )
 
     # 2. Network Instantiation
@@ -624,6 +666,8 @@ if __name__ == "__main__":
                         help="If set, dog_max is hidden from agent observations (set to 0.0)")
     parser.add_argument("--hide_time_budget", action="store_true",
                         help="If set, time budget info is hidden from agent observations (set to 0.0)")
+    parser.add_argument("--memory_size", type=int, default=None,
+                        help="If set, only the last N choices are shown in the grid observation")
     args = parser.parse_args()
     
     run_training(
@@ -639,4 +683,5 @@ if __name__ == "__main__":
         non_dog_fraction=args.non_dog_fraction,
         hide_dog_max=args.hide_dog_max,
         hide_time_budget=args.hide_time_budget,
+        memory_size=args.memory_size,
     )
