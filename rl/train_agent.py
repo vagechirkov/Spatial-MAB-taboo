@@ -35,7 +35,7 @@ class BatchedSpatialBanditEnv(EnvBase):
     def __init__(self, gp_bank, dog_bank, turbulence_bank=None, is_dog_bank=None, num_envs=128, grid_size=33, 
                  budgets=[25, 50, 100, 200], noise_std=0.01, turbulence_scale=0.0,
                  device='cuda', dog_max_range=[1.0, 3.0], fixed_eval_grid=False,
-                 hide_dog_max=False):
+                 hide_dog_max=False, hide_time_budget=False):
         
         super().__init__(device=device, batch_size=torch.Size([num_envs]))
         
@@ -51,6 +51,7 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.dog_max_range = dog_max_range
         self.fixed_eval_grid = fixed_eval_grid
         self.hide_dog_max = hide_dog_max
+        self.hide_time_budget = hide_time_budget
         self.reward_scale = 10.0
 
         self.observation_spec = Composite({
@@ -177,6 +178,10 @@ class BatchedSpatialBanditEnv(EnvBase):
             dog_max_obs = torch.zeros_like(self.current_dog_max).unsqueeze(1)
         else:
             dog_max_obs = self.current_dog_max.unsqueeze(1)
+            
+        if self.hide_time_budget:
+            step_fraction_obs = torch.zeros_like(step_fraction_obs)
+            total_budget_obs = torch.zeros_like(total_budget_obs)
             
         avg_reward_obs = (self.cumulative_reward / torch.clamp(self.budget, min=1.0)).unsqueeze(1)
         
@@ -368,7 +373,7 @@ class CriticHead(nn.Module):
 def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 100, 150, 200], 
                  length_scale=4.0, dog_max_range=[1.2, 1.8], total_timesteps=100_000_000,
                  turbulence_scale=0.0, valley_gradient_mag=0.0, noise_std=0.01,
-                 non_dog_fraction=0.0, hide_dog_max=False):
+                 non_dog_fraction=0.0, hide_dog_max=False, hide_time_budget=False):
     
     # 0. Hyperparameter Configuration
     config = {
@@ -397,6 +402,7 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         "turbulence_scale": turbulence_scale,
         "valley_gradient_mag": valley_gradient_mag,
         "regen_freq": 250_000,
+        "hide_time_budget": hide_time_budget,
     }
 
     # 1. Environment Initialization
@@ -413,7 +419,8 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         noise_std=config["noise_std"], 
         turbulence_scale=config["turbulence_scale"],
         device=config["device"],
-        hide_dog_max=hide_dog_max
+        hide_dog_max=hide_dog_max,
+        hide_time_budget=hide_time_budget
     )
     
     # Evaluation Bank: ALWAYS 100% DoG (non_dog_fraction=0.0)
@@ -429,7 +436,8 @@ def run_training(environment="correlated_dog", grid_size=33, budgets=[25, 50, 10
         dog_max_range=config["dog_max_range"], 
         turbulence_scale=config["turbulence_scale"],
         device=config["device"], fixed_eval_grid=True,
-        hide_dog_max=hide_dog_max
+        hide_dog_max=hide_dog_max,
+        hide_time_budget=hide_time_budget
     )
 
     # 2. Network Instantiation
@@ -614,6 +622,8 @@ if __name__ == "__main__":
                         help="Fraction of training bank with pure GP maps (no DoG component)")
     parser.add_argument("--hide_dog_max", action="store_true",
                         help="If set, dog_max is hidden from agent observations (set to 0.0)")
+    parser.add_argument("--hide_time_budget", action="store_true",
+                        help="If set, time budget info is hidden from agent observations (set to 0.0)")
     args = parser.parse_args()
     
     run_training(
@@ -628,4 +638,5 @@ if __name__ == "__main__":
         noise_std=args.noise_std,
         non_dog_fraction=args.non_dog_fraction,
         hide_dog_max=args.hide_dog_max,
+        hide_time_budget=args.hide_time_budget,
     )
