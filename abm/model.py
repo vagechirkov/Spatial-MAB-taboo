@@ -8,6 +8,7 @@ from .agent import SocialGPAgent
 from mesa import DataCollector
 from mesa.discrete_space import Network
 from .rewards import (
+    make_mexican_hat_two_valleys,
     make_parent_and_children_cholesky,
     make_parent_and_children_gabor,
     make_parent_and_children_mexican_hat,
@@ -180,7 +181,7 @@ class SocialGPModel(mesa.Model):
                 n_children=n,
                 **reward_env_params,
             )
-        elif reward_env_type in ("mexican_hat", "dog"):
+        elif reward_env_type == "dog":
             # Currently implemented as DoG-based mexican hat
             parent, child_maps = make_parent_and_children_mexican_hat(
                 rng=self.rng,
@@ -201,6 +202,18 @@ class SocialGPModel(mesa.Model):
             else:
                 # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
                 self.peak_radius = reward_env_params['length_scale'] // 2.0
+        elif reward_env_type == "mexican_hat_2_valleys":
+            parent, child_maps, self.reward_peak = make_mexican_hat_two_valleys(
+                rng=self.rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0 
 
         else:
             raise ValueError(
@@ -258,7 +271,7 @@ class SocialGPModel(mesa.Model):
 
         # Reporter radii are in grid-distance units.
         self.global_peak_report_radius = 1.0
-        self.local_peak_report_radius  = 1.0
+        self.local_peak_report_radius  = 3.0
 
         # Local peak locations are static because reward maps are static.
         self.local_peak_coordinates = {
