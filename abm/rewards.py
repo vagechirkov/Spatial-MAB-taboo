@@ -655,9 +655,75 @@ def make_correlated_dog(
 
     return mix, gp, dog, min_coords
 
+
+def mexican_hat_two_valleys(
+    rng=None,
+    grid_size=25,
+    length_scale=10.0,
+    sigma_inner=None,
+    sigma_outer=None,
+    secondary_sigma=None,
+    secondary_amplitude=0.8,
+    dog_exclusion_radius=None,
+):
+    """
+    Variant of `make_correlated_dog` with a second valley.
+
+    Workflow:
+    1) Generate the original GP landscape.
+    2) Add a DoG kernel at the global minimum.
+     3) Find the next minimum in the original landscape while excluding the
+         local region where the primary DoG kernel is centered.
+    4) Add a negative Gaussian kernel at that second location.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    if sigma_inner is None and sigma_outer is None:
+        sigma_outer = length_scale
+        sigma_inner = sigma_outer / 2.0
+    if secondary_sigma is None:
+        secondary_sigma = sigma_inner
+    if dog_exclusion_radius is None:
+        dog_exclusion_radius = float(sigma_outer)
+
+    # Original landscape
+    gp = _cholesky_grid(rng, grid_size, length_scale=length_scale)
+    min_coords = np.unravel_index(np.argmin(gp), gp.shape)
+
+    # Primary Mexican-hat valley (DoG) at global minimum
+    dog = dog_rbf_landscape(
+        grid_size=grid_size,
+        sigma_inner=sigma_inner,
+        sigma_outer=sigma_outer,
+        center=min_coords,
+    )
+    dog = dog / np.abs(dog).max() * 1.2
+    dog = dog - dog.mean()
+
+    # Exclude the local DoG region around the first minimum when searching
+    # for the second minimum in the original GP landscape.
+    rows, cols = np.indices(gp.shape)
+    r2_from_primary = (rows - min_coords[0])**2 + (cols - min_coords[1])**2
+    exclusion_mask = r2_from_primary <= float(dog_exclusion_radius) ** 2
+    candidates = ~exclusion_mask
+
+    second_min_coords = None
+    second_valley = np.zeros_like(gp)
+    if np.any(candidates):
+        second_index = np.argmin(np.where(candidates, gp, np.inf))
+        second_min_coords = np.unravel_index(second_index, gp.shape)
+
+        r2 = (rows - second_min_coords[0])**2 + (cols - second_min_coords[1])**2
+        second_valley = -float(secondary_amplitude) * np.exp(
+            -r2 / (2.0 * float(secondary_sigma) ** 2)
+        )
+
+    mix = _min_max(gp + dog + second_valley)
+    return mix, gp, dog, second_valley, min_coords, second_min_coords
+
 def make_correlated_dog_from_gp(
     parent,
-    length_scale=4.0,
+    length_scale=4.5,
     sigma_inner=None,
     sigma_outer=None,
     min_coords=None,
@@ -693,8 +759,8 @@ def make_parent_and_children_correlated_dog(
     rng,
     grid_size=33,
     n_children=1,
-    length_scale=4.0,
-    target_correlation=0.6,
+    length_scale=4.5,
+    target_correlation=1.0,
     sigma_inner=None,
     sigma_outer=None,
     fixed_min_coords=False,
@@ -760,3 +826,28 @@ def make_parent_and_children_correlated_dog(
         children_mix.append(mix)
 
     return parent_mix, children_mix, min_coords
+
+def make_mexican_hat_two_valleys(
+    rng=None,
+    n_children=1,
+    grid_size=33,
+    length_scale=4.5,
+    sigma_inner=None,
+    sigma_outer=None,
+    secondary_sigma=None,
+    secondary_amplitude=0.8,
+    dog_exclusion_radius=None,
+):
+    env, _, _, min_coords, _, _ = mexican_hat_two_valleys(
+        rng=rng,
+        grid_size=grid_size,
+        length_scale=length_scale,
+        sigma_inner=sigma_inner,
+        sigma_outer=sigma_outer,
+        secondary_sigma=secondary_sigma,
+        secondary_amplitude=secondary_amplitude,
+        dog_exclusion_radius=dog_exclusion_radius,
+    )
+
+    return env, [env.copy() for _ in range(n_children)], min_coords
+        
