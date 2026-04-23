@@ -2,16 +2,16 @@
 
 # Use `sbatch --job-name=<name> ... run_parameter_sweep.sh` to override.
 # `%x` expands to the effective Slurm job name.
-#SBATCH --job-name=monadic-lambda-sweep
+#SBATCH --job-name=monadic-lambda-sweep_2
 #SBATCH --output=/scratch/%u/logs/%x_%j.log
 #SBATCH --error=/scratch/%u/logs/%x_%j.err
 #SBATCH --partition=long
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-#SBATCH --array=0-0
-#SBATCH --time=2:00:00
+#SBATCH --array=101-140
+#SBATCH --time=12:00:00
 
 set -euo pipefail
 
@@ -82,23 +82,32 @@ RUNNER_MODULE="${RUNNER_MODULE:-abm.run_slurm_jobs}"
 GRID_SIZE="${GRID_SIZE:-33}"
 LAMBDA_TRUE="${LAMBDA_TRUE:-4.5}"
 TARGET_CORRELATION="${TARGET_CORRELATION:-1.0}"
-N_AGENTS="${N_AGENTS:-2}"
+N_AGENTS="${N_AGENTS:-1}"
 N_RUNS="${N_RUNS:-100}"
-MAX_STEPS="${MAX_STEPS:-500}"
-ALPHA="${ALPHA:-0.12}"
+MAX_STEPS="${MAX_STEPS:-300}"
+ALPHA="${ALPHA:-0.0}"
 
-BETA_START="${BETA_START:-0.53}"
-BETA_STOP="${BETA_STOP:-0.54}"
+BETA_START="${BETA_START:-0.8}"
+BETA_STOP="${BETA_STOP:-1.0}"
 BETA_STEP="${BETA_STEP:-0.025}"
 
 TAU_OFFSET="${TAU_OFFSET:-0.0}"
-TAU_START="${TAU_START:-0.02}"
-TAU_STOP="${TAU_STOP:-0.03}"
+TAU_START="${TAU_START:-0.03}"
+TAU_STOP="${TAU_STOP:-0.04}"
 TAU_STEP="${TAU_STEP:-0.02}"
 
-LENGTH_SCALE_MULTIPLIERS="${LENGTH_SCALE_MULTIPLIERS:-0.1}" # 1.0
+# Length-scale sweep modes (first match wins):
+# 1) LENGTH_SCALE_VALUES (absolute CSV)
+# 2) LENGTH_SCALE_LOG_START/STOP/NUM (absolute logarithmic sweep)
+# 3) LENGTH_SCALE_MULTIPLIERS (relative to LAMBDA_TRUE)
+LENGTH_SCALE_VALUES="${LENGTH_SCALE_VALUES:-}"
+LENGTH_SCALE_LOG_START="${LENGTH_SCALE_LOG_START:-0.1}"
+LENGTH_SCALE_LOG_STOP="${LENGTH_SCALE_LOG_STOP:-9.0}"
+LENGTH_SCALE_LOG_NUM="${LENGTH_SCALE_LOG_NUM:-40}"
+LENGTH_SCALE_LOG_BASE="${LENGTH_SCALE_LOG_BASE:-10}"
+LENGTH_SCALE_MULTIPLIERS="${LENGTH_SCALE_MULTIPLIERS:-}" # 1.0
 
-COLLECT_EVERY="${COLLECT_EVERY:-1}"
+COLLECT_EVERY="${COLLECT_EVERY:--1}"
 
 # Parallelism inside mesa.batch_run.
 # Default to Slurm's CPU allocation if available.
@@ -127,10 +136,10 @@ if [[ ! "${JOB_INDEX}" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-if [[ "${JOB_INDEX}" -ge "${NUM_JOBS}" ]]; then
-  echo "JOB_INDEX must be in [0, NUM_JOBS), got JOB_INDEX=${JOB_INDEX}, NUM_JOBS=${NUM_JOBS}" >&2
-  exit 1
-fi
+# if [[ "${JOB_INDEX}" -ge "${NUM_JOBS}" ]]; then
+#   echo "JOB_INDEX must be in [0, NUM_JOBS), got JOB_INDEX=${JOB_INDEX}, NUM_JOBS=${NUM_JOBS}" >&2
+#   exit 1
+# fi
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -160,13 +169,29 @@ cmd=(
   --tau-start "${TAU_START}"
   --tau-stop "${TAU_STOP}"
   --tau-step "${TAU_STEP}"
-  --length-scale-multipliers "${LENGTH_SCALE_MULTIPLIERS}"
   --output-csv "${OUTPUT_CSV}"
   --num-jobs "${NUM_JOBS}"
   --data-collection-period "${COLLECT_EVERY}"
   --job-index "${JOB_INDEX}"
   --log-every "${LOG_EVERY}"
 )
+
+if [[ -n "${LENGTH_SCALE_VALUES}" ]]; then
+  cmd+=(--length-scale-values "${LENGTH_SCALE_VALUES}")
+elif [[ -n "${LENGTH_SCALE_LOG_START}" || -n "${LENGTH_SCALE_LOG_STOP}" || -n "${LENGTH_SCALE_LOG_NUM}" ]]; then
+  if [[ -z "${LENGTH_SCALE_LOG_START}" || -z "${LENGTH_SCALE_LOG_STOP}" || -z "${LENGTH_SCALE_LOG_NUM}" ]]; then
+    echo "Length-scale log sweep requires LENGTH_SCALE_LOG_START, LENGTH_SCALE_LOG_STOP, and LENGTH_SCALE_LOG_NUM" >&2
+    exit 1
+  fi
+  cmd+=(
+    --length-scale-log-start "${LENGTH_SCALE_LOG_START}"
+    --length-scale-log-stop "${LENGTH_SCALE_LOG_STOP}"
+    --length-scale-log-num "${LENGTH_SCALE_LOG_NUM}"
+    --length-scale-log-base "${LENGTH_SCALE_LOG_BASE}"
+  )
+else
+  cmd+=(--length-scale-multipliers "${LENGTH_SCALE_MULTIPLIERS}")
+fi
 
 if [[ -n "${NUMBER_PROCESSES}" ]]; then
   cmd+=(--number-processes "${NUMBER_PROCESSES}")
@@ -190,6 +215,13 @@ echo "OUTPUT_STEM: ${OUTPUT_STEM}"
 echo "SLURM_JOB_ID: ${SLURM_JOB_ID:-none}"
 echo "SLURM_ARRAY_TASK_ID: ${SLURM_ARRAY_TASK_ID:-none}"
 echo "NUM_JOBS=${NUM_JOBS}, JOB_INDEX=${JOB_INDEX}"
+if [[ -n "${LENGTH_SCALE_VALUES}" ]]; then
+  echo "Length-scale sweep mode: absolute values (${LENGTH_SCALE_VALUES})"
+elif [[ -n "${LENGTH_SCALE_LOG_START}" || -n "${LENGTH_SCALE_LOG_STOP}" || -n "${LENGTH_SCALE_LOG_NUM}" ]]; then
+  echo "Length-scale sweep mode: log space start=${LENGTH_SCALE_LOG_START}, stop=${LENGTH_SCALE_LOG_STOP}, num=${LENGTH_SCALE_LOG_NUM}, base=${LENGTH_SCALE_LOG_BASE}"
+else
+  echo "Length-scale sweep mode: multipliers (${LENGTH_SCALE_MULTIPLIERS}) * lambda_true"
+fi
 echo "NUMBER_PROCESSES=${NUMBER_PROCESSES:-mesa-default}"
 echo "Output CSV: ${OUTPUT_CSV}"
 

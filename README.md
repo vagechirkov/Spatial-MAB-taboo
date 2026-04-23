@@ -113,6 +113,47 @@ All sweep settings are grouped at the top of `run_parameter_sweep.sh`:
 
 The script writes CSV incrementally per parameter combination to keep memory bounded.
 
+### Length-Scale Sweep Modes
+
+`run_parameter_sweep.sh` supports three mutually exclusive length-scale sweep modes.
+Priority is first-match:
+
+1. `LENGTH_SCALE_VALUES` (absolute CSV list)
+2. `LENGTH_SCALE_LOG_START` + `LENGTH_SCALE_LOG_STOP` + `LENGTH_SCALE_LOG_NUM` (absolute log-space)
+3. `LENGTH_SCALE_MULTIPLIERS` (relative to `LAMBDA_TRUE`, fallback)
+
+#### 1) Absolute explicit values
+
+```bash
+LENGTH_SCALE_VALUES="0.1,0.2,0.5,1.0,2.0" ./run_parameter_sweep.sh
+```
+
+#### 2) Absolute logarithmic sweep
+
+```bash
+LENGTH_SCALE_LOG_START=0.1 \
+LENGTH_SCALE_LOG_STOP=10 \
+LENGTH_SCALE_LOG_NUM=9 \
+LENGTH_SCALE_LOG_BASE=10 \
+./run_parameter_sweep.sh
+```
+
+This generates values equivalent to `numpy.logspace(log_base(start), log_base(stop), num)`.
+
+Slurm example:
+
+```bash
+sbatch --export=ALL,LENGTH_SCALE_LOG_START=0.1,LENGTH_SCALE_LOG_STOP=10,LENGTH_SCALE_LOG_NUM=9 run_parameter_sweep.sh
+```
+
+#### 3) Multiplier mode (legacy/default)
+
+```bash
+LAMBDA_TRUE=4.5 LENGTH_SCALE_MULTIPLIERS="0.1,0.5,1.0,2.0" ./run_parameter_sweep.sh
+```
+
+This evaluates absolute `length_scale = LAMBDA_TRUE * multiplier`.
+
 Both shell launchers call the same Python runner module:
 
 ```bash
