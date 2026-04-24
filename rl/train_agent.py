@@ -165,7 +165,7 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.current_turbulence_mask[idx] = turb_maps
         
         # Store exact DoG peak index (for t_dog calculation in evaluation)
-        self.dog_peak_indices[idx] = torch.argmax(dog_maps.view(n, -1), dim=1)
+        self.dog_peak_indices[idx] = torch.argmax(dog_maps.reshape(n, -1), dim=1)
         
         # Reset tracking variables
         self.revealed_rewards[idx] = 0.0
