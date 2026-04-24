@@ -68,6 +68,20 @@ def inclusive_float_range(start: float, stop: float, step: float) -> list[float]
     return np.round(values, 12).tolist()
 
 
+def build_log_space(start: float, stop: float, num: int, base: float) -> list[float]:
+    if start <= 0 or stop <= 0:
+        raise ValueError("length-scale log sweep bounds must be positive")
+    if num <= 0:
+        raise ValueError("length-scale log sweep num must be >= 1")
+    if base <= 0 or base == 1.0:
+        raise ValueError("length-scale log sweep base must be positive and not equal to 1")
+
+    log_start = np.log(start) / np.log(base)
+    log_stop = np.log(stop) / np.log(base)
+    values = np.logspace(log_start, log_stop, num=num, base=base, dtype=float)
+    return np.round(values, 12).tolist()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -130,6 +144,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated multipliers applied to lambda_true for agent length_scale.",
     )
     parser.add_argument(
+        "--length-scale-values",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated absolute length_scale values. "
+            "When set, overrides --length-scale-multipliers."
+        ),
+    )
+    parser.add_argument(
+        "--length-scale-log-start",
+        type=float,
+        default=None,
+        help=(
+            "Optional absolute length_scale lower bound for logarithmic sweep. "
+            "Requires --length-scale-log-stop and --length-scale-log-num. "
+            "When set (with companions), overrides --length-scale-multipliers."
+        ),
+    )
+    parser.add_argument(
+        "--length-scale-log-stop",
+        type=float,
+        default=None,
+        help="Optional absolute length_scale upper bound for logarithmic sweep.",
+    )
+    parser.add_argument(
+        "--length-scale-log-num",
+        type=int,
+        default=None,
+        help="Optional number of logarithmically spaced absolute length_scale values.",
+    )
+    parser.add_argument(
+        "--length-scale-log-base",
+        type=float,
+        default=10.0,
+        help="Logarithm base for --length-scale-log-* sweep parameters.",
+    )
+    parser.add_argument(
         "--length-scale-multipliers-by-agent",
         type=str,
         default=None,
@@ -190,6 +241,17 @@ def main() -> None:
         "length-scale-multipliers-by-agent",
     )
 
+    has_log_start = args.length_scale_log_start is not None
+    has_log_stop = args.length_scale_log_stop is not None
+    has_log_num = args.length_scale_log_num is not None
+    if any([has_log_start, has_log_stop, has_log_num]) and not all(
+        [has_log_start, has_log_stop, has_log_num]
+    ):
+        raise ValueError(
+            "length-scale logarithmic sweep requires all of: "
+            "--length-scale-log-start, --length-scale-log-stop, --length-scale-log-num"
+        )
+
     if beta_by_agent is None:
         beta_values = inclusive_float_range(args.beta_start, args.beta_stop, args.beta_step)
     else:
@@ -202,8 +264,18 @@ def main() -> None:
         tau_values = [as_batch_fixed([args.tau_offset + tau_value for tau_value in tau_by_agent])]
 
     if length_scale_multipliers_by_agent is None:
-        length_scale_multipliers = parse_csv_floats(args.length_scale_multipliers)
-        length_scale_values = [args.lambda_true * multiplier for multiplier in length_scale_multipliers]
+        if args.length_scale_values is not None:
+            length_scale_values = parse_csv_floats(args.length_scale_values)
+        elif has_log_start:
+            length_scale_values = build_log_space(
+                start=args.length_scale_log_start,
+                stop=args.length_scale_log_stop,
+                num=args.length_scale_log_num,
+                base=args.length_scale_log_base,
+            )
+        else:
+            length_scale_multipliers = parse_csv_floats(args.length_scale_multipliers)
+            length_scale_values = [args.lambda_true * multiplier for multiplier in length_scale_multipliers]
     else:
         length_scale_values = [
             as_batch_fixed(

@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 from matplotlib.animation import FuncAnimation
@@ -338,3 +339,83 @@ def animate_heatmap_trajectory(
         ani.save(save_path, writer='pillow', fps=fps)
 
     return ani, fig, ax
+
+
+def sample_parameters_from_csv(
+    csv_path: str,
+    n_samples: int,
+    param_columns: dict[str, str],
+    rng: np.random.Generator | None = None,
+    param_scaling: dict[str, tuple[float, float]] | None = None,
+) -> list[dict]:
+    """
+    Sample parameter sets from a CSV file.
+
+    Parameters
+    ----------
+    csv_path : str
+        Path to the CSV file containing parameter distributions.
+    n_samples : int
+        Number of parameter sets to sample.
+    param_columns : dict[str, str]
+        Mapping from model parameter names to CSV column names.
+        Example: {'length_scale': 'lambda_0', 'tau': 'tau_0', 'beta': 'beta_0'}
+    rng : np.random.Generator, optional
+        Random number generator. If None, uses np.random.default_rng().
+    param_scaling : dict[str, tuple[float, float]] | None, optional
+        Scaling to apply to specific parameters after sampling.
+        Keys are parameter names (must be in param_columns).
+        Values are tuples of (source_lambda, target_lambda) - the sampled value
+        will be scaled as: scaled_value = sample * target_lambda / source_lambda.
+        Example: {'length_scale': (1.5, 4.5)} scales length_scale from an
+        environment with lambda=1.5 to lambda=4.5.
+
+    Returns
+    -------
+    list[dict]
+        List of parameter dictionaries, each containing sampled (and optionally
+        scaled) values for the specified parameters.
+
+    Notes
+    -----
+    - For batches with multiple runs, each run will sample a new parameter set.
+    - Parameters not specified in param_columns are not sampled (use fixed values
+      in the model configuration).
+    - Sampling is done with replacement if n_samples > number of rows in CSV.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    df = pd.read_csv(csv_path)
+
+    # Validate that all specified columns exist
+    missing_cols = set(param_columns.values()) - set(df.columns)
+    if missing_cols:
+        raise ValueError(f"CSV columns not found: {missing_cols}")
+
+    # Validate param_scaling keys are in param_columns
+    if param_scaling is not None:
+        invalid_keys = set(param_scaling.keys()) - set(param_columns.keys())
+        if invalid_keys:
+            raise ValueError(
+                f"Parameters in param_scaling not in param_columns: {invalid_keys}"
+            )
+
+    # Sample rows from the dataframe
+    sampled_indices = rng.integers(0, len(df), size=n_samples)
+    sampled_rows = df.iloc[sampled_indices]
+
+    # Build parameter dictionaries
+    param_sets = []
+    for _, row in sampled_rows.iterrows():
+        param_set = {}
+        for model_param, csv_col in param_columns.items():
+            value = row[csv_col]
+            # Apply scaling if specified
+            if param_scaling is not None and model_param in param_scaling:
+                source_lambda, target_lambda = param_scaling[model_param]
+                value = value * target_lambda / source_lambda
+            param_set[model_param] = value
+        param_sets.append(param_set)
+
+    return param_sets
