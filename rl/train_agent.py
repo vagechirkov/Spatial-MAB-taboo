@@ -84,6 +84,7 @@ class BatchedSpatialBanditEnv(EnvBase):
         self.revealed_rewards = torch.zeros(num_envs, grid_size, grid_size, device=device)
         self.visited_mask = torch.zeros(num_envs, grid_size, grid_size, device=device)
         self.cumulative_reward = torch.zeros(num_envs, device=device)
+        self.dog_peak_indices = torch.zeros(num_envs, dtype=torch.long, device=device)
         
         if self.fixed_eval_grid: 
             self._init_fixed_grid()
@@ -162,6 +163,9 @@ class BatchedSpatialBanditEnv(EnvBase):
         combined_landscape = gp_maps + dog_maps * dog_max_vals.view(n, 1, 1)
         self.true_rewards[idx] = torch.clamp(combined_landscape, min=0.0)
         self.current_turbulence_mask[idx] = turb_maps
+        
+        # Store exact DoG peak index (for t_dog calculation in evaluation)
+        self.dog_peak_indices[idx] = torch.argmax(dog_maps.view(n, -1), dim=1)
         
         # Reset tracking variables
         self.revealed_rewards[idx] = 0.0

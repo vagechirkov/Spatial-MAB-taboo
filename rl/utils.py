@@ -523,7 +523,7 @@ def evaluate_models(policy, eval_env):
             for idx in torch.where(mask_gp)[0]:
                 t_gp[idx.item()] = int(step_count[idx].item())
                 
-        mask_dog = torch.tensor([x is None for x in t_dog], device=device) & (true_reward > 0.95 * dog_maxes_torch) & active
+        mask_dog = torch.tensor([x is None for x in t_dog], device=device) & (action == eval_env.dog_peak_indices) & active
         if mask_dog.any():
             for idx in torch.where(mask_dog)[0]:
                 t_dog[idx.item()] = int(step_count[idx].item())
@@ -537,7 +537,7 @@ def evaluate_models(policy, eval_env):
         dones = dones | done
         td = step_mdp(td)
         
-    found_dog = [bool(max_reward[i] > 1.05) for i in range(n_envs)]
+    found_dog = [bool(t_dog[i] is not None) for i in range(n_envs)]
     
     return {
         "budgets": budgets_tensor.tolist(),
