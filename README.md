@@ -229,7 +229,11 @@ NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_
 
 NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 15 30 45 60 --dog_max_range 1.0 2.0 --total_timesteps 500000000 --turbulence_scale 0.0 --valley_gradient_mag 0.0 --noise_std 0.01 --non_dog_fraction 0.0 --hide_dog_max
 
-NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 15 30 45 60 --dog_max_range 0.5 1.5 --total_timesteps 500000000 --noise_std 0.05
+NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=1 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 25 50 75 100 --dog_max_range 0.5 2.0 --total_timesteps 1000000000 --noise_std 0.05
+
+NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 25 50 75 100 --dog_max_range 0.5 2.0 --total_timesteps 1000000000 --hide_dog_max --noise_std 0.05
+
+NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=0 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 25 50 75 100 --dog_max_range 0.5 2.0 --total_timesteps 1000000000 --hide_time_budget --noise_std 0.05
 
 NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_scale 4.0 --grid_size 33 --budgets 15 30 45 60 --dog_max_range 1.0 2.0 --total_timesteps 500000000 --hide_dog_max --hide_time_budget --noise_std 0.05
 
@@ -241,4 +245,5 @@ NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_
 
 ```bash
 python3 abm/visualization_optimal_dog.py
+python3 rl/utils.py
 ```

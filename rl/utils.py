@@ -552,7 +552,7 @@ def evaluate_models(policy, eval_env):
 
 
 def visualize_dog_max_scaling(
-    dog_max_values=[1.2, 1.5, 1.8, 2.0], 
+    dog_max_values=[0.5, 1.0, 1.5, 2.0], 
     grid_size=33, 
     length_scale=4.0, 
     seed=42, 
@@ -685,8 +685,8 @@ def visualize_features(
 
 
 if __name__ == "__main__":
-    # print("--- Running Dog Max Scaling Visualization ---")
-    # visualize_dog_max_scaling(length_scale=4.0)
+    print("--- Running Dog Max Scaling Visualization ---")
+    visualize_dog_max_scaling(length_scale=4.0)
     
-    print("\n--- Running Dog Refinement Visualization ---")
-    visualize_features(grid_size=33, valley_gradient_mag=0.001, turbulence_scale=0.2)
+    # print("\n--- Running Dog Refinement Visualization ---")
+    # visualize_features(grid_size=33, valley_gradient_mag=0.001, turbulence_scale=0.2)
