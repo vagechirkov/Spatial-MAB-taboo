@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
-from .utils import sample_parameters_from_csv
+from .utils import sample_parameters_from_csv, sample_parameters_from_distributions
 
 
 def run_condition_batches(
@@ -128,6 +128,137 @@ def run_sampled_batches(
         csv_path=csv_path,
         n_samples=n_runs,
         param_columns=param_columns,
+        rng=rng,
+        param_scaling=param_scaling,
+    )
+
+    frames = []
+
+    for run_idx, sampled in enumerate(sampled_params):
+        # Create parameter dict for this run: start with base, override with sampled
+        run_parameters = dict(base_parameters)
+        run_parameters.update(sampled)
+
+        # Handle reporter formatting for mesa.batch_run
+        for reporter_key in ("model_reporters_to_collect", "agent_reporters_to_collect"):
+            reporter_value = run_parameters.get(reporter_key)
+            if (
+                isinstance(reporter_value, list)
+                and (len(reporter_value) == 0 or all(isinstance(item, str) for item in reporter_value))
+            ):
+                run_parameters[reporter_key] = [reporter_value]
+
+        # Use a unique seed for each run to ensure reproducibility
+        run_seed = int(rng.integers(0, 2**31))
+
+        results = mesa.batch_run(
+            model_cls,
+            parameters=run_parameters,
+            max_steps=max_steps,
+            data_collection_period=data_collection_period,
+            display_progress=False,  # Disable per-run progress to reduce output
+            number_processes=number_processes,
+            rng=[run_seed],
+        )
+
+        run_df = pd.DataFrame(results)
+        run_df["condition"] = condition_name
+        run_df["sample_idx"] = run_idx
+        frames.append(run_df)
+
+        if display_progress:
+            print(f"Completed run {run_idx + 1}/{n_runs}")
+
+    if len(frames) == 0:
+        return pd.DataFrame()
+
+    return pd.concat(frames, ignore_index=True)
+
+
+def run_distributed_batches(
+    *,
+    model_cls,
+    base_parameters: dict,
+    param_distributions: dict[str, dict],
+    n_runs: int,
+    max_steps: int,
+    data_collection_period: int = 1,
+    number_processes: int | None = None,
+    display_progress: bool = True,
+    rng: np.random.Generator | None = None,
+    condition_name: str = "distributed",
+    param_scaling: dict[str, tuple[float, float]] | None = None,
+) -> pd.DataFrame:
+    """
+    Run batch simulations with parameters sampled from specified distributions.
+
+    Supports log-normal distributions (for length_scale, beta, tau, alpha) and
+    uniform distributions (for any parameter).
+
+    Parameters
+    ----------
+    model_cls : class
+        The model class to instantiate (e.g., SocialGPModel).
+    base_parameters : dict
+        Base parameters for the model. Parameters to be sampled should be omitted
+        or set to placeholder values (they will be overridden).
+    param_distributions : dict[str, dict]
+        Mapping from model parameter names to distribution specifications.
+        Each specification is a dict with 'distribution' key and distribution-specific
+        parameters:
+
+        For log-normal distribution:
+            {'distribution': 'lognormal', 'mu': float, 'sigma': float}
+            - mu: mean of the underlying normal distribution (log scale)
+            - sigma: standard deviation of the underlying normal distribution
+
+        For uniform distribution:
+            {'distribution': 'uniform', 'a': float, 'b': float}
+            - a: lower bound
+            - b: upper bound
+
+        Example:
+            {
+                'length_scale': {'distribution': 'lognormal', 'mu': 0.5, 'sigma': 0.3},
+                'beta': {'distribution': 'lognormal', 'mu': -1.0, 'sigma': 0.5},
+                'tau': {'distribution': 'uniform', 'a': 0.01, 'b': 0.1},
+                'alpha': {'distribution': 'lognormal', 'mu': -0.5, 'sigma': 0.4},
+            }
+
+    n_runs : int
+        Number of simulation runs.
+    max_steps : int
+        Maximum number of steps per run.
+    data_collection_period : int, optional
+        How often to collect data. Default is 1 (every step).
+    number_processes : int | None, optional
+        Number of processes for parallel execution. Default is None (sequential).
+    display_progress : bool, optional
+        Whether to display progress. Default is True.
+    rng : np.random.Generator, optional
+        Random number generator. If None, uses np.random.default_rng().
+    condition_name : str, optional
+        Name for the condition in the output dataframe. Default is "distributed".
+    param_scaling : dict[str, tuple[float, float]] | None, optional
+        Scaling to apply to specific parameters after sampling.
+        Keys are parameter names (must be in param_distributions).
+        Values are tuples of (source_lambda, target_lambda) - the sampled value
+        will be scaled as: scaled_value = sample * target_lambda / source_lambda.
+        Example: {'length_scale': (1.5, 4.5)} scales length_scale from an
+        environment with lambda=1.5 to lambda=4.5.
+
+    Returns
+    -------
+    pd.DataFrame
+        Combined dataframe with all simulation results, including a 'condition' column.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    # Sample parameter sets for each run
+    sampled_params = sample_parameters_from_distributions(
+        n_samples=n_runs,
+        param_distributions=param_distributions,
         rng=rng,
         param_scaling=param_scaling,
     )

@@ -15,6 +15,7 @@ from .rewards import (
     build_corr_matrix_bare_bones,
     make_parent_and_children_correlated_dog,
 )
+from .rewards_clean import create_mexican_hat_gp_set
 from .reporter_helpers import (
     find_global_peak_coordinates,
     find_local_peak_coordinates,
@@ -192,6 +193,19 @@ class SocialGPModel(mesa.Model):
         elif reward_env_type == "corr_dog":
             # Correlated DoG landscapes
             parent, child_maps, self.reward_peak = make_parent_and_children_correlated_dog(
+                rng=self.rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0
+        elif reward_env_type == "mexican_hat_gp":
+            # Mexican Hat GP landscapes
+            parent, child_maps, self.reward_peak = create_mexican_hat_gp_set(
                 rng=self.rng,
                 grid_size=grid_size,
                 n_children=n,

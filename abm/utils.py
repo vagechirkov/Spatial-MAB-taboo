@@ -419,3 +419,126 @@ def sample_parameters_from_csv(
         param_sets.append(param_set)
 
     return param_sets
+
+
+def sample_parameters_from_distributions(
+    n_samples: int,
+    param_distributions: dict[str, dict],
+    rng: np.random.Generator | None = None,
+    param_scaling: dict[str, tuple[float, float]] | None = None,
+) -> list[dict]:
+    """
+    Sample parameter sets from specified distributions.
+
+    Supports log-normal distributions (for length_scale, beta, tau, alpha) and
+    uniform distributions (for any parameter).
+
+    Parameters
+    ----------
+    n_samples : int
+        Number of parameter sets to sample.
+    param_distributions : dict[str, dict]
+        Mapping from model parameter names to distribution specifications.
+        Each specification is a dict with 'distribution' key and distribution-specific
+        parameters:
+
+        For log-normal distribution:
+            {'distribution': 'lognormal', 'mu': float, 'sigma': float}
+            - mu: mean of the underlying normal distribution (log scale)
+            - sigma: standard deviation of the underlying normal distribution
+
+        For uniform distribution:
+            {'distribution': 'uniform', 'a': float, 'b': float}
+            - a: lower bound
+            - b: upper bound
+
+        Example:
+            {
+                'length_scale': {'distribution': 'lognormal', 'mu': 0.5, 'sigma': 0.3},
+                'beta': {'distribution': 'lognormal', 'mu': -1.0, 'sigma': 0.5},
+                'tau': {'distribution': 'uniform', 'a': 0.01, 'b': 0.1},
+                'alpha': {'distribution': 'lognormal', 'mu': -0.5, 'sigma': 0.4},
+            }
+
+    rng : np.random.Generator, optional
+        Random number generator. If None, uses np.random.default_rng().
+    param_scaling : dict[str, tuple[float, float]] | None, optional
+        Scaling to apply to specific parameters after sampling.
+        Keys are parameter names (must be in param_distributions).
+        Values are tuples of (source_lambda, target_lambda) - the sampled value
+        will be scaled as: scaled_value = sample * target_lambda / source_lambda.
+        Example: {'length_scale': (1.5, 4.5)} scales length_scale from an
+        environment with lambda=1.5 to lambda=4.5.
+
+    Returns
+    -------
+    list[dict]
+        List of parameter dictionaries, each containing sampled values for
+        the specified parameters.
+
+    Notes
+    -----
+    - Parameters not specified in param_distributions will not be sampled
+      (use fixed values in the model configuration).
+    - Log-normal is useful for positive parameters that span orders of magnitude.
+    - Uniform is useful for bounded parameters where any value in range is equally likely.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    if n_samples <= 0:
+        raise ValueError("n_samples must be a positive integer")
+
+    if not param_distributions:
+        return [{}] * n_samples
+
+    # Validate param_scaling keys are in param_distributions
+    if param_scaling is not None:
+        invalid_keys = set(param_scaling.keys()) - set(param_distributions.keys())
+        if invalid_keys:
+            raise ValueError(
+                f"Parameters in param_scaling not in param_distributions: {invalid_keys}"
+            )
+
+    # Validate distribution specifications
+    supported_distributions = {"lognormal", "uniform"}
+    for param_name, dist_spec in param_distributions.items():
+        if not isinstance(dist_spec, dict):
+            raise TypeError(
+                f"Parameter '{param_name}' must have a dict specification, "
+                f"got {type(dist_spec).__name__}"
+            )
+        distribution_type = dist_spec.get("distribution")
+        if distribution_type not in supported_distributions:
+            raise ValueError(
+                f"Parameter '{param_name}': unknown distribution '{distribution_type}'. "
+                f"Supported: {supported_distributions}"
+            )
+
+    # Sample parameters
+    param_sets = []
+    for _ in range(n_samples):
+        param_set = {}
+        for param_name, dist_spec in param_distributions.items():
+            distribution_type = dist_spec["distribution"]
+
+            if distribution_type == "lognormal":
+                mu = dist_spec["mu"]
+                sigma = dist_spec["sigma"]
+                value = rng.lognormal(mean=mu, sigma=sigma)
+
+            elif distribution_type == "uniform":
+                a = dist_spec["a"]
+                b = dist_spec["b"]
+                value = rng.uniform(low=a, high=b)
+
+            # Apply scaling if specified
+            if param_scaling is not None and param_name in param_scaling:
+                source_lambda, target_lambda = param_scaling[param_name]
+                value = value * target_lambda / source_lambda
+
+            param_set[param_name] = value
+
+        param_sets.append(param_set)
+
+    return param_sets
