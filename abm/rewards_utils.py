@@ -91,7 +91,7 @@ def _mexican_hat_gaussian(grid_size, frequency=2.0, sigma_inner=None, sigma_oute
     mh = mh - mh.mean()
     return mh
 
-def mexican_hat_rbf(grid_size, sigma_inner, sigma_outer, center=None):
+def _mexican_hat_rbf(grid_size, sigma_inner, sigma_outer, center=None):
     """
     Difference-of-RBF (Mexican Hat) landscape.
     Parameters
@@ -115,7 +115,7 @@ def mexican_hat_rbf(grid_size, sigma_inner, sigma_outer, center=None):
     mh = inner - outer * (sigma_inner/sigma_outer)
     return mh
 
-def mexican_hat_sinusoid(grid_size, sigma_inner, sigma_outer, center=None):
+def _mexican_hat_sinusoid(grid_size, sigma_inner, sigma_outer, center=None):
     """
     Sinusoidal Mexican Hat landscape.
     Parameters
@@ -203,3 +203,60 @@ def check_correlations_matrix(parent, children, R_target, tol=0.1):
     i, j = np.triu_indices(R_target.shape[0], k=1)
     diffs = np.abs(C[i, j] - R_target[i, j])
     return np.all(diffs <= tol)
+
+
+def find_local_max(grid, center_coords, radius, exclude_center=False):
+    """
+    Find the maximum value in a 2D grid outside a specified radius from a center point.
+    
+    Parameters:
+    -----------
+    grid : 2D numpy array
+        The grid containing the values (shape: rows, cols)
+    center_coords : tuple (cy, cx)
+        The (y, x) coordinates of the MH center in grid indices (row, column)
+    radius : float
+        The radius (in grid units) outside which to search for the maximum
+    exclude_center : bool, default=False
+        If True, also exclude the exact center cell even if radius=0
+    
+    Returns:
+    --------
+    max_value : float
+        The maximum value outside the specified radius
+    max_coords : tuple (y, x)
+        The coordinates (row, col) of the maximum outside the radius
+    mask : 2D bool array
+        The mask showing which points were considered (True = included in search)
+    """
+    rows, cols = grid.shape
+    cy, cx = center_coords
+    
+    # Create coordinate arrays matching the grid shape
+    # y_coords = row indices, x_coords = column indices
+    y_coords, x_coords = np.meshgrid(np.arange(rows), np.arange(cols), indexing='ij')
+    
+    # Calculate squared distance from center for all points
+    squared_distances = (x_coords - cx)**2 + (y_coords - cy)**2
+    
+    # Create mask: True for points outside the radius
+    mask = squared_distances > radius**2
+    
+    if exclude_center:
+        # Also exclude the exact center cell
+        center_mask = (x_coords == cx) & (y_coords == cy)
+        mask = mask & ~center_mask
+    
+    # Apply mask to grid
+    masked_values = np.where(mask, grid, -np.inf)
+    
+    # Find maximum and its location
+    max_value = np.max(masked_values)
+    if np.isneginf(max_value):
+        # No valid points found
+        return None, None, mask
+    
+    max_flat_idx = np.argmax(masked_values)
+    max_coords = np.unravel_index(max_flat_idx, grid.shape)
+    
+    return max_value, max_coords, mask

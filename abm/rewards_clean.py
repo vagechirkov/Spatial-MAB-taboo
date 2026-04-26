@@ -13,7 +13,7 @@ from abm.rewards_utils import (
     _min_max,
     _gabor_filter,
     _mexican_hat_gaussian,
-    mexican_hat_rbf,
+    _mexican_hat_rbf,
     _cholesky_grid,
     build_correlation_matrix,
 )
@@ -544,31 +544,34 @@ def create_mexican_hat_gp_single(
     
     grid_size = parent.shape[0]
     
-    # Scale GP so its max amplitude = 1 (local max = 1)
-    gp_scaled = _min_max(parent)
-    gp_max = gp_scaled.max()
-    if gp_max > 0:
-        gp_scaled = gp_scaled / gp_max
-    
     if sigma_inner is None and sigma_outer is None:
         sigma_outer = length_scale
         sigma_inner = sigma_outer / 2.0
     
     if min_coords is None:
-        min_coords = np.unravel_index(np.argmin(gp_scaled), gp_scaled.shape)
+        min_coords = np.unravel_index(np.argmin(parent), parent.shape)
     
     # Generate Mexican Hat kernel
-    mh_kernel = mexican_hat_rbf(
+    mh_kernel = _mexican_hat_rbf(
         grid_size=grid_size,
         sigma_inner=sigma_inner,
         sigma_outer=sigma_outer,
         center=min_coords
     )
+
+    # Find amplitude of mh_kernel outside of the hat
+    mh_outside_amplitude = -mh_kernel.min() / (mh_kernel.max() - mh_kernel.min())
+
+    # Scale GP so its max amplitude = mh_outside_amplitude
+    gp_scaled = parent * (1-mh_outside_amplitude * local_global_max_ratio)
+    # gp_max = gp_scaled.max()
+    # if gp_max > 0:
+    #     gp_scaled = gp_scaled / gp_max
     
     # Scale MH kernel so its max amplitude = local_global_max_ratio
     # (since GP/local max is already scaled to 1)
-    mh_kernel = mh_kernel * local_global_max_ratio
-    
+    mh_kernel = _min_max(mh_kernel) * local_global_max_ratio
+   
     return gp_scaled + mh_kernel, min_coords
 
 
@@ -695,7 +698,7 @@ def create_two_valley_single(
     gp = _cholesky_grid(rng, grid_size, length_scale=length_scale)
     min_coords = np.unravel_index(np.argmin(gp), gp.shape)
     
-    mh_kernel = mexican_hat_rbf(
+    mh_kernel = _mexican_hat_rbf(
         grid_size=grid_size,
         sigma_inner=sigma_inner,
         sigma_outer=sigma_outer,
