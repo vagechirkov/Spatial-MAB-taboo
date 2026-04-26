@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
 def plot_foraging_advantage_heatmap(t_gp, t_dog, max_T=150, max_R=3.0):
-    T_vals = np.linspace(0, max_T, 300)
-    R_vals = np.linspace(0, max_R, 300)
+    T_vals = np.linspace(15, max_T, 300)
+    R_vals = np.linspace(0.5, max_R, 300)
     T, R = np.meshgrid(T_vals, R_vals)
     
     V_gp = np.maximum(0, T - t_gp)
@@ -42,9 +42,9 @@ def plot_foraging_advantage_heatmap(t_gp, t_dog, max_T=150, max_R=3.0):
     return fig, ax
 
 if __name__ == "__main__":
-    t_gp = 5
-    t_dog = 35
-    fig, ax = plot_foraging_advantage_heatmap(t_gp=t_gp, t_dog=t_dog, max_T=150, max_R=3.0)
+    t_gp = 30
+    t_dog = 40
+    fig, ax = plot_foraging_advantage_heatmap(t_gp=t_gp, t_dog=t_dog, max_T=100, max_R=2.0)
 
     output_path = "foraging_advantage_heatmap.png"
     plt.savefig(output_path)
