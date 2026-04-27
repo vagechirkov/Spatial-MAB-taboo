@@ -2,7 +2,7 @@
 
 # Use `sbatch --job-name=<name> ... run_parameter_sweep.sh` to override.
 # `%x` expands to the effective Slurm job name.
-#SBATCH --job-name=monadic-lambda-sweep_2
+#SBATCH --job-name=lambda-oft-plot
 #SBATCH --output=/scratch/%u/logs/%x_%j.log
 #SBATCH --error=/scratch/%u/logs/%x_%j.err
 #SBATCH --partition=long
@@ -10,7 +10,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=2
 #SBATCH --mem=8G
-#SBATCH --array=101-140
+#SBATCH --array=0-100
 #SBATCH --time=12:00:00
 
 set -euo pipefail
@@ -82,18 +82,19 @@ RUNNER_MODULE="${RUNNER_MODULE:-abm.run_slurm_jobs}"
 GRID_SIZE="${GRID_SIZE:-33}"
 LAMBDA_TRUE="${LAMBDA_TRUE:-4.5}"
 TARGET_CORRELATION="${TARGET_CORRELATION:-1.0}"
+LOCAL_GLOBAL_MAX_RATIO="${LOCAL_GLOBAL_MAX_RATIO:-3.0}"
 N_AGENTS="${N_AGENTS:-1}"
 N_RUNS="${N_RUNS:-100}"
 MAX_STEPS="${MAX_STEPS:-300}"
 ALPHA="${ALPHA:-0.0}"
 
-BETA_START="${BETA_START:-0.8}"
-BETA_STOP="${BETA_STOP:-1.0}"
-BETA_STEP="${BETA_STEP:-0.025}"
+BETA_START="${BETA_START:-0.3}"
+BETA_STOP="${BETA_STOP:-0.7}"
+BETA_STEP="${BETA_STEP:-0.1}"
 
 TAU_OFFSET="${TAU_OFFSET:-0.0}"
 TAU_START="${TAU_START:-0.03}"
-TAU_STOP="${TAU_STOP:-0.04}"
+TAU_STOP="${TAU_STOP:-0.031}"
 TAU_STEP="${TAU_STEP:-0.02}"
 
 # Length-scale sweep modes (first match wins):
@@ -101,13 +102,13 @@ TAU_STEP="${TAU_STEP:-0.02}"
 # 2) LENGTH_SCALE_LOG_START/STOP/NUM (absolute logarithmic sweep)
 # 3) LENGTH_SCALE_MULTIPLIERS (relative to LAMBDA_TRUE)
 LENGTH_SCALE_VALUES="${LENGTH_SCALE_VALUES:-}"
-LENGTH_SCALE_LOG_START="${LENGTH_SCALE_LOG_START:-0.1}"
-LENGTH_SCALE_LOG_STOP="${LENGTH_SCALE_LOG_STOP:-9.0}"
-LENGTH_SCALE_LOG_NUM="${LENGTH_SCALE_LOG_NUM:-40}"
+LENGTH_SCALE_LOG_START="${LENGTH_SCALE_LOG_START:-0.5}"
+LENGTH_SCALE_LOG_STOP="${LENGTH_SCALE_LOG_STOP:-3.0}"
+LENGTH_SCALE_LOG_NUM="${LENGTH_SCALE_LOG_NUM:-10}"
 LENGTH_SCALE_LOG_BASE="${LENGTH_SCALE_LOG_BASE:-10}"
 LENGTH_SCALE_MULTIPLIERS="${LENGTH_SCALE_MULTIPLIERS:-}" # 1.0
 
-COLLECT_EVERY="${COLLECT_EVERY:--1}"
+COLLECT_EVERY="${COLLECT_EVERY:-1}"
 
 # Parallelism inside mesa.batch_run.
 # Default to Slurm's CPU allocation if available.
@@ -169,6 +170,7 @@ cmd=(
   --tau-start "${TAU_START}"
   --tau-stop "${TAU_STOP}"
   --tau-step "${TAU_STEP}"
+  --local-global-max-ratio "${LOCAL_GLOBAL_MAX_RATIO}"
   --output-csv "${OUTPUT_CSV}"
   --num-jobs "${NUM_JOBS}"
   --data-collection-period "${COLLECT_EVERY}"

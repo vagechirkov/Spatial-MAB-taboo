@@ -190,6 +190,13 @@ def build_parser() -> argparse.ArgumentParser:
             "When set, overrides --length-scale-multipliers sweep and is passed as one fixed mesa.batch_run value."
         ),
     )
+    parser.add_argument(
+        "--local-global-max-ratio", type=float, default=None,
+        help=(
+            "Optional local/global max ratio for MH GP reward landscape. "
+            "When set, overrides default in reward_params and is passed as one fixed mesa.batch_run value."
+        ),
+    )
 
     parser.add_argument("--output-csv", type=str, default="parameter_sweep_corr_dog.csv")
     parser.add_argument("--append", action="store_true")
@@ -301,6 +308,9 @@ def main() -> None:
         "target_correlation": args.target_correlation,
     }
 
+    if args.local_global_max_ratio is not None:
+        reward_params["local_global_max_ratio"] = args.local_global_max_ratio
+
     total_combinations = len(beta_values) * len(length_scale_values) * len(tau_values)
     assigned_combinations = sum(
         1
@@ -323,7 +333,7 @@ def main() -> None:
             "length_scale": length_scale_value,
             "tau": tau_value,
             "alpha": alpha_value,
-            "reward_env_type": "corr_dog",
+            "reward_env_type": "mexican_hat_gp",
             "reward_env_params": [reward_params],
             "collect_agent_reporters": True,
             "model_reporters_to_collect": [["mean_cumulative_reward"]],
