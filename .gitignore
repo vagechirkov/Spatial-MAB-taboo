@@ -323,3 +323,5 @@ mab_logs
 *.zip
 wandb
 *.pt
+old_sbi_pipeline/
+sbi-logs/

@@ -247,3 +247,15 @@ NVIDIA_TF32_OVERRIDE=1 CUDA_VISIBLE_DEVICES=2 python rl/train_agent.py --length_
 python3 abm/visualization_optimal_dog.py
 python3 rl/utils.py
 ```
+
+
+## SBI Pipelines
+
+```bash
+python -m sbi_pipelines.simulate
+python -m sbi_pipelines.pipeline_cnn
+python -m sbi_pipelines.pipeline_summary
+python -m sbi_pipelines.pipeline_mle
+python -m sbi_pipelines.evaluate_all
+python -m sbi_pipelines.run_all --data_dir sim_5k_1k
+```
