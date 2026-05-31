@@ -555,7 +555,7 @@ def visualize_dog_max_scaling(
     dog_max_values=[0.5, 1.0, 1.5, 2.0], 
     grid_size=33, 
     length_scale=4.0, 
-    seed=42, 
+    seed=765, 
     device='cpu'
 ):
     print(f"Generating examples for dog_max comparison (Seed: {seed}, Length Scale: {length_scale})...")
@@ -573,7 +573,7 @@ def visualize_dog_max_scaling(
         )
         grid = grids[0].numpy()
         
-        im = axes[i].imshow(grid, origin='lower', cmap='viridis')
+        im = axes[i].imshow(grid, origin='lower', cmap='viridis', vmin=0, vmax=max(dog_max_values))
         axes[i].set_title(f"dog_max = {dog_max}")
         axes[i].axis('off')
         fig.colorbar(im, ax=axes[i])
@@ -584,9 +584,11 @@ def visualize_dog_max_scaling(
     plt.suptitle(f"Correlated DoG Comparison (Seed: {seed}, LS: {length_scale})")
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
     
-    save_path = "dog_examples_comparison.png"
-    plt.savefig(save_path)
-    print(f"\nComparison plot saved to: {os.path.abspath(save_path)}")
+    save_path_png = "dog_examples_comparison.png"
+    plt.savefig(save_path_png)
+    save_path_pdf = "dog_examples_comparison.pdf"
+    plt.savefig(save_path_pdf)
+    print(f"\nComparison plot saved to: {os.path.abspath(save_path_png)} and {os.path.abspath(save_path_pdf)}")
 
 
 def visualize_features(

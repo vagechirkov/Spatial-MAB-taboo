@@ -318,6 +318,7 @@ abm/sbi-simulations
 *.csv
 .vscode
 *.png
+*.pdf
 mab_logs
 *.zip
 wandb
