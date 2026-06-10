@@ -6,9 +6,10 @@ import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
 from sbi.analysis import pairplot
 from sbi_pipelines.pipeline_summary import load_data as load_data_summary
-from sbi_pipelines.pipeline_cnn import prepare_cnn_data, RecurrentCNNEmbedding
+from sbi_pipelines.pipeline_4d_cnn import prepare_4d_data, Embedding4DCNN
 import __main__
-__main__.RecurrentCNNEmbedding = RecurrentCNNEmbedding
+__main__.Embedding4DCNN = Embedding4DCNN
+
 
 def plot_posteriors(data_dir, res_dir):
     print("Generating pairplots for 5 test samples...")
@@ -16,16 +17,16 @@ def plot_posteriors(data_dir, res_dir):
     os.makedirs(out_dir, exist_ok=True)
     
     # Load posteriors
-    post_cnn = torch.load(os.path.join(res_dir, "pipeline_cnn", "posterior_cnn.pt"), weights_only=False)
-    post_sum = torch.load(os.path.join(res_dir, "pipeline_summary", "posterior_summary.pt"), weights_only=False)
+    post_cnn = torch.load(os.path.join(res_dir, "pipeline_4d_cnn", "posterior_4d_cnn.pt"), weights_only=False, map_location="cpu")
+    post_sum = torch.load(os.path.join(res_dir, "pipeline_summary", "posterior_summary.pt"), weights_only=False, map_location="cpu")
     
     # Load test data
     test_data = torch.load(os.path.join(data_dir, "test_data.pt"), weights_only=False)
     
     # Get x_test
     train_data = torch.load(os.path.join(data_dir, "train_data.pt"), weights_only=False)
-    _, _, fit_stats = prepare_cnn_data(train_data)
-    theta_test, x_test_cnn, _ = prepare_cnn_data(test_data, fit_stats)
+    _, _, fit_stats = prepare_4d_data(train_data)    
+    theta_test, x_test_cnn, _ = prepare_4d_data(test_data, fit_stats)
     _, x_test_sum = load_data_summary(os.path.join(data_dir, "test_data.pt"))
     
     # Load MLE results
@@ -34,7 +35,7 @@ def plot_posteriors(data_dir, res_dir):
     param_names = [r"$\lambda$", r"$\beta$", r"$\tau$", r"$\alpha$"]
     
     # Pick 5 samples
-    for i in range(5):
+    for i in range(30):
         _theta = theta_test[i]
         _x_cnn = x_test_cnn[i]
         _x_sum = x_test_sum[i]
@@ -50,8 +51,8 @@ def plot_posteriors(data_dir, res_dir):
         mle_tensor = torch.tensor(mle_est, dtype=torch.float32)
         
         # Sample from posteriors
-        samples_cnn = post_cnn.sample((2000,), x=_x_cnn, show_progress_bars=False)
-        samples_sum = post_sum.sample((2000,), x=_x_sum, show_progress_bars=False)
+        samples_cnn = post_cnn.sample((200_000,), x=_x_cnn, show_progress_bars=False)
+        samples_sum = post_sum.sample((200_000,), x=_x_sum, show_progress_bars=False)
         
         fig, axes = pairplot(
             samples=[samples_sum, samples_cnn],
@@ -60,17 +61,15 @@ def plot_posteriors(data_dir, res_dir):
             labels=param_names,
             figsize=(10, 10),
             upper='contour',
-            diag='kde',
-            fig_kwargs={'samples_colors': ['blue', 'orange']}
+            diag='kde'
+        )
+        plt.legend(
+            ["Summary", "4DCNN", "True", "MLE"],
+            frameon=False,
+            fontsize=8,
+            loc="upper right"
         )
 
-        blue_patch = mlines.Line2D([], [], color='blue', label='Summary NPE')
-        orange_patch = mlines.Line2D([], [], color='orange', label='CNN NPE')
-        red_point = mlines.Line2D([], [], color='red', marker='*', linestyle='None', markersize=10, label='Ground Truth')
-        black_point = mlines.Line2D([], [], color='black', marker='*', linestyle='None', markersize=10, label='MLE')
-        
-        fig.legend(handles=[blue_patch, orange_patch, red_point, black_point], loc='upper right')
-        
         plt.suptitle(f"Posterior Pairplot - Test Sample {i}", fontsize=16)
         plt.subplots_adjust(top=0.92) # Leave space for suptitle
         plt.savefig(os.path.join(out_dir, f"pairplot_sample_{i}.png"))

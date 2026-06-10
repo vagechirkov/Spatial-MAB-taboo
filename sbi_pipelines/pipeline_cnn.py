@@ -11,30 +11,35 @@ from sbi.neural_nets import posterior_nn
 from sbi.diagnostics import run_tarp, check_tarp
 from sbi.analysis import plot_tarp
 
-class RecurrentCNNEmbedding(nn.Module):
+class TransformerCNNEmbedding(nn.Module):
     def __init__(self, output_dim=21):
         super().__init__()
         
-        # CNN for the 11x11 landscape
+        # CNN for the 11x11 landscape (no pooling to preserve fine-grained details)
         self.cnn = nn.Sequential(
             nn.Conv2d(1, 8, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2), # 11x11 -> 5x5
             nn.Conv2d(8, 16, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2), # 5x5 -> 2x2
             nn.Flatten(),
-            nn.Linear(16 * 2 * 2, 32),
+            nn.Linear(16 * 11 * 11, 32),
             nn.ReLU()
         )
         
-        # RNN for the sequence of 15 steps
-        # Features per step: private choice (2), private reward (1), social choices (6), social rewards (3) -> total 12
-        self.rnn = nn.GRU(input_size=12, hidden_size=32, batch_first=True)
+        # Social Transformer (Cross-Agent Attention)
+        # Each agent's input is 3 features: (c_x, c_y, r). Project to d_model=32.
+        self.agent_proj = nn.Linear(3, 32)
+        social_layer = nn.TransformerEncoderLayer(d_model=32, nhead=4, dim_feedforward=64, batch_first=True)
+        self.social_transformer = nn.TransformerEncoder(social_layer, num_layers=1)
         
-        # Combine CNN and RNN embeddings
+        # Temporal Transformer (Sequence Attention)
+        self.pos_encoder = nn.Parameter(torch.randn(1, 15, 32))
+        temporal_layer = nn.TransformerEncoderLayer(d_model=32, nhead=4, dim_feedforward=64, batch_first=True)
+        self.temporal_transformer = nn.TransformerEncoder(temporal_layer, num_layers=2)
+        
+        # Fully connected layer for the landscape-conditioned sequence token
         self.fc = nn.Sequential(
-            nn.Linear(32 + 32, 64),
+            nn.Linear(32, 64),
             nn.ReLU(),
             nn.Linear(64, output_dim)
         )
@@ -59,15 +64,46 @@ class RecurrentCNNEmbedding(nn.Module):
             sequence = round_data[:, 121:].view(batch_size, 15, 12)
             
             # Process landscape
-            cnn_emb = self.cnn(landscape)
+            cnn_emb = self.cnn(landscape) # (batch, 32)
             
-            # Process sequence
-            rnn_out, _ = self.rnn(sequence)
-            rnn_emb = rnn_out[:, -1, :] # Take last hidden state
+            # --- Process Social Graph ---
+            # sequence contains (batch, 15, 12)
+            # The 12 features per step are: priv_c (2), priv_r (1), soc_c (6), soc_r (3)
+            # We reshape this into 4 agents (1 private + 3 social), each with 3 features (c_x, c_y, r).
+            priv_agent = sequence[:, :, 0:3] # (batch, 15, 3)
+            soc1 = torch.cat([sequence[:, :, 3:5], sequence[:, :, 9:10]], dim=2) # (batch, 15, 3)
+            soc2 = torch.cat([sequence[:, :, 5:7], sequence[:, :, 10:11]], dim=2) # (batch, 15, 3)
+            soc3 = torch.cat([sequence[:, :, 7:9], sequence[:, :, 11:12]], dim=2) # (batch, 15, 3)
             
-            # Combine
-            combined = torch.cat([cnn_emb, rnn_emb], dim=1)
-            emb = self.fc(combined)
+            # Stack agents into a graph: (batch, 15, 4, 3)
+            agents = torch.stack([priv_agent, soc1, soc2, soc3], dim=2)
+            
+            # Flatten batch and time to process all social graphs in parallel
+            agents_flat = agents.view(batch_size * 15, 4, 3)
+            
+            # Project and run Social Transformer
+            agents_proj = self.agent_proj(agents_flat) # (batch*15, 4, 32)
+            social_out = self.social_transformer(agents_proj) # (batch*15, 4, 32)
+            
+            # Extract the updated representation for the private agent (index 0)
+            priv_social_out = social_out[:, 0, :] # (batch*15, 32)
+            
+            # Reshape back to sequence format for Temporal Transformer
+            temporal_input = priv_social_out.view(batch_size, 15, 32)
+            
+            # --- Process Temporal Sequence ---
+            # Add positional encoding
+            temporal_input = temporal_input + self.pos_encoder # (batch, 15, 32)
+            
+            # Prepend the landscape embedding as the first token in the sequence
+            cnn_token = cnn_emb.unsqueeze(1) # (batch, 1, 32)
+            combined_seq = torch.cat([cnn_token, temporal_input], dim=1) # (batch, 16, 32)
+            
+            # Pass the combined sequence through the temporal transformer
+            trans_out = self.temporal_transformer(combined_seq)
+            
+            # The first token now contains the sequence summary conditioned on the landscape
+            emb = self.fc(trans_out[:, 0, :])
             round_embeddings.append(emb)
             
         # Average over rounds
@@ -121,11 +157,12 @@ def prepare_cnn_data(data, fit_stats=None):
     return data['theta'], torch.tensor(np.array(x_list), dtype=torch.float32), fit_stats
 
 def train_npe(theta, x, prior):
-    print("Training NPE with Recurrent CNN...")
-    embedding_net = RecurrentCNNEmbedding(output_dim=21)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Training NPE with Transformer CNN on {device}...")
+    embedding_net = TransformerCNNEmbedding(output_dim=21).to(device)
     # Disable z_score_x to prevent sbi from destroying spatial structures via independent scaling
     neural_posterior = posterior_nn(model="nsf", embedding_net=embedding_net, z_score_x='none')
-    inference = SNPE(prior=prior, density_estimator=neural_posterior)
+    inference = SNPE(prior=prior, density_estimator=neural_posterior, device=device)
     posterior_net = inference.append_simulations(theta, x).train(show_train_summary=True)
     return inference.build_posterior(posterior_net)
 
@@ -144,7 +181,7 @@ def evaluate_recovery(posterior, theta_test, x_test, n_samples=10_000):
         for param_idx in range(len(_theta)):
             param_samples = samples_np[:, param_idx]
             mean_val = np.mean(param_samples)
-            hpdi = np.quantile(param_samples, [0.05, 0.95])
+            hpdi = np.quantile(param_samples, [0.1, 0.9])
             
             results.append({
                 'test_idx': i,
@@ -189,9 +226,10 @@ if __name__ == "__main__":
     out_dir = os.path.join(args.out_dir, "pipeline_cnn")
     os.makedirs(out_dir, exist_ok=True)
     
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     lb = [0.1, 0.01, 0.005, 0.0]
     ub = [5.0, 2.0,  0.1,   1.0]
-    prior = BoxUniform(low=torch.tensor(lb), high=torch.tensor(ub))
+    prior = BoxUniform(low=torch.tensor(lb, device=device), high=torch.tensor(ub, device=device), device=device)
     param_names = [r"$\lambda$", r"$\beta$", r"$\tau$", r"$\alpha$"]
     
     train_data = torch.load(os.path.join(data_dir, "train_data.pt"))
@@ -205,6 +243,10 @@ if __name__ == "__main__":
     
     # Save posterior
     torch.save(posterior, os.path.join(out_dir, "posterior_cnn.pt"))
+    posterior = torch.load(os.path.join(out_dir, "posterior_cnn.pt"), map_location=device)
+    
+    theta_test = theta_test.to(device)
+    x_test = x_test.to(device)
     
     # Evaluate
     df_results = evaluate_recovery(posterior, theta_test, x_test)
@@ -215,9 +257,13 @@ if __name__ == "__main__":
     
     # Posterior Diagnostics (TARP)
     print("Running TARP diagnostics...")
+    posterior.to("cpu")
+    theta_test_cpu = theta_test.to("cpu")
+    x_test_cpu = x_test.to("cpu")
+    
     ecp, alpha_tarp = run_tarp(
-        theta_test,
-        x_test,
+        theta_test_cpu,
+        x_test_cpu,
         posterior,
         num_workers=-1,
         num_posterior_samples=1000
@@ -234,8 +280,8 @@ if __name__ == "__main__":
     try:
         from sbi.diagnostics import run_sbc, check_sbc
         print("Running SBC diagnostics...")
-        ranks, dap_samples = run_sbc(theta_test, x_test, posterior, num_posterior_samples=1000)
-        sbc_checks = check_sbc(ranks, theta_test, dap_samples, num_posterior_samples=1000)
+        ranks, dap_samples = run_sbc(theta_test_cpu, x_test_cpu, posterior, num_posterior_samples=1000)
+        sbc_checks = check_sbc(ranks, theta_test_cpu, dap_samples, num_posterior_samples=1000)
         print("SBC KS p-values:", sbc_checks['ks_pvals'])
         
         # Plot SBC ranks

@@ -17,15 +17,18 @@ def compute_advanced_summaries(choices, rewards):
     # rewards: (N, 7, 15, 4)
     N, R, S, A, _ = choices.shape
     
-    # We will compute metrics per step and then average across agents
-    # metrics shape: (N, R, S, A, 10)
-    metrics = np.zeros((N, R, S, A, 10), dtype=np.float32)
+    # metrics shape: (N, R, S, A, 13)
+    metrics = np.zeros((N, R, S, A, 13), dtype=np.float32)
     
     for i in range(N):
         for r in range(R):
             for a in range(A):
                 c = choices[i, r, :, a, :] # (15, 2)
                 rew = rewards[i, r, :, a] # (15,)
+                
+                # Identify neighbor indices (all agents except a)
+                neighbors_c = np.delete(choices[i, r], a, axis=1) # (15, 3, 2)
+                neighbors_rew = np.delete(rewards[i, r], a, axis=1) # (15, 3)
                 
                 max_reward = -np.inf
                 max_reward_coord = c[0]
@@ -71,6 +74,18 @@ def compute_advanced_summaries(choices, rewards):
                     # 10. proportion of revisits
                     prop_revisits = revisits / (t + 1)
                     
+                    # Social features
+                    if t > 0:
+                        prev_soc_c = neighbors_c[t-1] # (3, 2)
+                        dists_to_soc = np.linalg.norm(c[t] - prev_soc_c, axis=1)
+                        min_dist_social = np.min(dists_to_soc)
+                        avg_dist_social = np.mean(dists_to_soc)
+                        max_soc_rew = np.max(neighbors_rew[t-1])
+                    else:
+                        min_dist_social = 0.0
+                        avg_dist_social = 0.0
+                        max_soc_rew = 0.0
+                    
                     metrics[i, r, t, a, 0] = prev_rew
                     metrics[i, r, t, a, 1] = max_reward
                     metrics[i, r, t, a, 2] = run_avg
@@ -80,6 +95,9 @@ def compute_advanced_summaries(choices, rewards):
                     metrics[i, r, t, a, 7] = dist_from_max
                     metrics[i, r, t, a, 8] = is_revisit
                     metrics[i, r, t, a, 9] = prop_revisits
+                    metrics[i, r, t, a, 10] = min_dist_social
+                    metrics[i, r, t, a, 11] = avg_dist_social
+                    metrics[i, r, t, a, 12] = max_soc_rew
                     
                 # 6. mean running average
                 run_avgs = [np.mean(rew[:k+1]) for k in range(S)]

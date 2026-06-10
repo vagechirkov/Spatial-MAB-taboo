@@ -6,7 +6,7 @@ import seaborn as sns
 def compare_recoveries(res_dir):
     paths = {
         'Summary Stats NPE': os.path.join(res_dir, "pipeline_summary", "recovery_summary.csv"),
-        'Recurrent CNN NPE': os.path.join(res_dir, "pipeline_cnn", "recovery_cnn.csv"),
+        'Recurrent CNN NPE': os.path.join(res_dir, "pipeline_4d_cnn", "recovery_4d_cnn.csv"),
         'MLE': os.path.join(res_dir, "pipeline_mle", "recovery_mle.csv")
     }
     
