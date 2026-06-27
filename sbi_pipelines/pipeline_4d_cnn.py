@@ -33,7 +33,8 @@ class Embedding4DCNN(nn.Module):
             nn.Flatten(),
             nn.Linear(32 * 3 * 2 * 2, 128),
             nn.ReLU(),
-            nn.Linear(128, output_dim)
+            nn.Linear(128, output_dim),
+            nn.LayerNorm(output_dim)
         )
         
     def forward(self, x):
@@ -101,38 +102,49 @@ def train_npe(theta, x, prior, chunk_size=5000):
     embedding_net = Embedding4DCNN(output_dim=21).to(device)
     # Disable z_score_x to prevent sbi from destroying spatial structures via independent scaling
     neural_posterior = posterior_nn(model="nsf", embedding_net=embedding_net, z_score_x='none')
-    
     inference = SNPE(prior=prior, density_estimator=neural_posterior, device=device)
-    posterior_net = None
+    inference = inference.append_simulations(theta_train, x_train)
+
+    posterior_net = inference.train(
+        # training_batch_size=64, # Lower this if CUDA OOMs
+        show_train_summary=True
+    )
     
-    n_samples = len(theta)
-    print(f"Total samples: {n_samples}. Training in chunks of {chunk_size} to avoid OOM.")
+    # inference = SNPE(prior=prior, density_estimator=neural_posterior, device=device)
+    # posterior_net = None
     
-    for i in range(0, n_samples, chunk_size):
-        end_idx = min(i + chunk_size, n_samples)
-        print(f"\n--- Training on dataset chunk {i} to {end_idx} ---")
+    # n_samples = len(theta)
+    # print(f"Total samples: {n_samples}. Training in chunks of {chunk_size} to avoid OOM.")
+    
+    # for i in range(0, n_samples, chunk_size):
+    #     end_idx = min(i + chunk_size, n_samples)
+    #     print(f"\n--- Training on dataset chunk {i} to {end_idx} ---")
         
-        theta_chunk = theta[i:end_idx]
-        x_chunk = x[i:end_idx]
+    #     theta_chunk = theta[i:end_idx]
+    #     x_chunk = x[i:end_idx]
         
-        # Append only the current chunk
-        inference = inference.append_simulations(theta_chunk, x_chunk)
+    #     # Append only the current chunk
+    #     inference = inference.append_simulations(theta_chunk, x_chunk)
         
-        if posterior_net is None:
-            posterior_net = inference.train(show_train_summary=True)
-        else:
-            posterior_net = inference.train(show_train_summary=True, retrain_from_scratch=False)
+    #     if posterior_net is None:
+    #         posterior_net = inference.train(show_train_summary=True)
+    #     else:
+    #         posterior_net = inference.train(
+    #             show_train_summary=True, 
+    #             retrain_from_scratch=False, 
+    #             force_first_round_loss=True
+    #         )
             
-        # Manually clear data from the inference object to avoid OOM by accumulation
-        # Accommodates different versions of sbi
-        if hasattr(inference, '_theta_bank'):
-            inference._theta_bank = []
-            inference._x_bank = []
-        if hasattr(inference, '_data_theta'):
-            inference._data_theta = None
-            inference._data_x = None
-        if hasattr(inference, '_dataset'):
-            inference._dataset = None
+    #     # Manually clear data from the inference object to avoid OOM by accumulation
+    #     # Accommodates different versions of sbi
+    #     if hasattr(inference, '_theta_bank'):
+    #         inference._theta_bank = []
+    #         inference._x_bank = []
+    #     if hasattr(inference, '_data_theta'):
+    #         inference._data_theta = None
+    #         inference._data_x = None
+    #     if hasattr(inference, '_dataset'):
+    #         inference._dataset = None
             
     return inference.build_posterior(posterior_net)
 
@@ -167,27 +179,27 @@ def evaluate_recovery(posterior, theta_test, x_test, n_samples=10_000):
 def plot_recovery(df_results, param_names, out_path):
     df_results['parameter_name'] = df_results['parameter'].map(dict(enumerate(param_names)))
     g = sns.FacetGrid(df_results, col="parameter_name", col_wrap=4, height=4, sharex=False, sharey=False, col_order=param_names)
-    g.map_dataframe(
-        lambda data, color: plt.scatter(
-            data['true_value'],
-            data['mean_recovered'],
-            # yerr=[data['mean_recovered'] - data['hpdi_lower'], data['hpdi_upper'] - data['mean_recovered']],
-            # fmt='o', alpha=0.5, capsize=0, 
-            color=color
-        )
-    )
-
     # g.map_dataframe(
-    #     lambda data, color: plt.errorbar(
+    #     lambda data, color: plt.scatter(
     #         data['true_value'],
     #         data['mean_recovered'],
-    #         yerr=[
-    #             (data['mean_recovered'] - data['hpdi_lower']).clip(lower=0),
-    #             (data['hpdi_upper'] - data['mean_recovered']).clip(lower=0)
-    #         ],
-    #         fmt='o', alpha=0.5, capsize=0, color=color
+    #         # yerr=[data['mean_recovered'] - data['hpdi_lower'], data['hpdi_upper'] - data['mean_recovered']],
+    #         # fmt='o', alpha=0.5, capsize=0, 
+    #         color=color
     #     )
     # )
+
+    g.map_dataframe(
+        lambda data, color: plt.errorbar(
+            data['true_value'],
+            data['mean_recovered'],
+            yerr=[
+                (data['mean_recovered'] - data['hpdi_lower']).clip(lower=0),
+                (data['hpdi_upper'] - data['mean_recovered']).clip(lower=0)
+            ],
+            fmt='o', alpha=0.5, capsize=0, color=color
+        )
+    )
     for ax in g.axes.flat:
         xlim = ax.get_xlim()
         ax.plot([xlim[0], xlim[1]], [xlim[0], xlim[1]], 'k--', alpha=0.6)
@@ -222,7 +234,7 @@ if __name__ == "__main__":
     theta_test, x_test, _ = prepare_4d_data(test_data, fit_stats)
     
     # Train
-    posterior = train_npe(theta_train, x_train, prior, chunk_size=20_000)
+    posterior = train_npe(theta_train, x_train, prior, chunk_size=35_000)
     
     # Save posterior
     torch.save(posterior, os.path.join(out_dir, "posterior_4d_cnn.pt"))

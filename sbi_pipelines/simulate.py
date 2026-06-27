@@ -102,7 +102,7 @@ def parallel_simulate(theta, n_jobs=8):
     return choices, rewards, landscapes, summaries
 
 if __name__ == "__main__":
-    out_dir = "/groups/romanczuk/Chirkov_mab/sbi/gp_ucb_vs_06_2026/sim_10k_1k"
+    out_dir = "/groups/romanczuk/Chirkov_mab/sbi/gp_ucb_vs_06_2026/sim_45k_1k"
     os.makedirs(out_dir, exist_ok=True)
     
     # Priors: lambda, beta, tau, alpha
@@ -110,8 +110,8 @@ if __name__ == "__main__":
     ub = [5.0, 2.0,  0.1,   1.0]
     prior = BoxUniform(low=torch.tensor(lb), high=torch.tensor(ub))
     
-    print("Simulating training data (10000)...")
-    theta_train = prior.sample((10_000,))
+    print("Simulating training data (45000)...")
+    theta_train = prior.sample((45_000,))
     c_train, r_train, l_train, s_train = parallel_simulate(theta_train, n_jobs=96)
     
     torch.save({
