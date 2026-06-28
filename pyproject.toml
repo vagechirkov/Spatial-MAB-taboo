@@ -22,6 +22,10 @@ dependencies = [
     "tensordict",
     "sbi>=0.26.1",
     "python-dotenv>=1.2.2",
+    "arviz>=1.2.0",
+    "pymc>=6.0.1",
+    "graphviz>=0.21",
+    "statsmodels>=0.14.6",
 ]
 
 [project.optional-dependencies]
