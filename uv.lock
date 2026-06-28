@@ -229,6 +229,26 @@ wheels = [
 ]
 
 [[package]]
+name = "bambi"
+version = "0.18.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "arviz-plots" },
+    { name = "formulae" },
+    { name = "graphviz" },
+    { name = "matplotlib" },
+    { name = "pandas" },
+    { name = "pymc" },
+    { name = "pytensor" },
+    { name = "seaborn" },
+    { name = "sparse" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f9/fe/cdcbcf4cae9dd996c6a58b5e4807dc2f3958f9e656afc8f15d78b4927b9a/bambi-0.18.0.tar.gz", hash = "sha256:2dea9a49c15e7b78f380a662d58bd27ff434da3933119609ee6a0ec3a9955f1c", size = 78959643, upload-time = "2026-05-19T12:37:48.53Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/00/037885d17dbbaaf4a5ff28d03a0f30a99e899dce1355cc751e735ec0282f/bambi-0.18.0-py3-none-any.whl", hash = "sha256:e3276dcd44ef08b152feae48f406c1daccc6172e28f2dfc9d9b75018f4e12e42", size = 104136, upload-time = "2026-05-19T12:37:46.362Z" },
+]
+
+[[package]]
 name = "beautifulsoup4"
 version = "4.14.3"
 source = { registry = "https://pypi.org/simple" }
@@ -649,6 +669,21 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f2/f6/53a1e9469331a23dcc400970a27a4caa3d9f6edbf5baab0260285238b884/fonttools-4.62.1-cp313-cp313-win32.whl", hash = "sha256:93c316e0f5301b2adbe6a5f658634307c096fd5aae60a5b3412e4f3e1728ab24", size = 2279928, upload-time = "2026-03-13T13:53:32.352Z" },
     { url = "https://files.pythonhosted.org/packages/38/60/35186529de1db3c01f5ad625bde07c1f576305eab6d86bbda4c58445f721/fonttools-4.62.1-cp313-cp313-win_amd64.whl", hash = "sha256:7aa21ff53e28a9c2157acbc44e5b401149d3c9178107130e82d74ceb500e5056", size = 2330514, upload-time = "2026-03-13T13:53:34.991Z" },
     { url = "https://files.pythonhosted.org/packages/fd/ba/56147c165442cc5ba7e82ecf301c9a68353cede498185869e6e02b4c264f/fonttools-4.62.1-py3-none-any.whl", hash = "sha256:7487782e2113861f4ddcc07c3436450659e3caa5e470b27dc2177cade2d8e7fd", size = 1152647, upload-time = "2026-03-13T13:54:22.735Z" },
+]
+
+[[package]]
+name = "formulae"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/84/39/1d2a5106d11f0372f464b8c60b2186c7c2089cf75401cb08cc3be9a4182a/formulae-0.6.2.tar.gz", hash = "sha256:c256c37bf40b5d61acc56faa174b97bc81b80722bdad97f4692dcc24b360af7f", size = 147072, upload-time = "2026-02-06T14:48:18.377Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/47/7b/fead2b0c05391ee8c16e37c91d85f1be08885e80bd511234caca90fdb51c/formulae-0.6.2-py3-none-any.whl", hash = "sha256:9b0913daf0ef213c70ce9ea2275604ef103e4d2a7a9edd86dadfd7095bdcfb65", size = 54644, upload-time = "2026-02-06T14:48:16.474Z" },
 ]
 
 [[package]]
@@ -3181,11 +3216,25 @@ wheels = [
 ]
 
 [[package]]
+name = "sparse"
+version = "0.17.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numba" },
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/63/74/5c674277fc3d61bd1863d233a8e1f7ddf35cb1adeeaf9973888629e7a9b1/sparse-0.17.0.tar.gz", hash = "sha256:6b1ad51a810c5be40b6f95e28513ec810fe1c785923bd83b2e4839a751df4bf7", size = 642387, upload-time = "2025-05-20T08:17:03.256Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8d/fd/42a1720542199ae6ff0f9c37bbd55dd3033ddd7bbe00d68cde09d6824887/sparse-0.17.0-py2.py3-none-any.whl", hash = "sha256:1922d1d97f692b1061c4f03a1dd6ee21850aedc88e171aa845715f5069952f18", size = 259370, upload-time = "2025-05-20T08:17:00.874Z" },
+]
+
+[[package]]
 name = "spatial-mab-taboo"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "arviz" },
+    { name = "bambi" },
     { name = "graphviz" },
     { name = "ipykernel" },
     { name = "jupyterlab" },
@@ -3215,6 +3264,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "arviz", specifier = ">=1.2.0" },
+    { name = "bambi", specifier = ">=0.18.0" },
     { name = "graphviz", specifier = ">=0.21" },
     { name = "ipykernel" },
     { name = "jupyterlab", specifier = ">=4.4.3" },
