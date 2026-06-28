@@ -155,10 +155,11 @@ def plot_trajectories(sequences, map_params, out_dir):
     max_jump = map_params['max_jump']
     # max_rg = map_params['max_rg']
     
-    markers = ['o', '^'] # 0: Local Exploration, 1: Global Exploration
-    c0 = '#0072B2' # Blue for Exploitation
-    c1 = '#D55E00' # Vermilion for Exploration
-    colors = [c0, c1]
+    markers = ['o', '^', 'P'] # 0: Local Exploration, 1: Global Exploration, 2: Exploitation
+    c0 = '#0072B2' # Blue for Local Exploration
+    c1 = '#D55E00' # Vermilion for Global Exploration
+    c2 = '#009E73' # Green for Exploitation
+    colors = [c0, c1, c2]
     
     unique_agents = sorted(list(set([s['agent'] for s in sequences])))
     agent_to_idx = {agent: i for i, agent in enumerate(unique_agents)}
@@ -213,6 +214,8 @@ def plot_trajectories(sequences, map_params, out_dir):
                     seq['jumps'], max_jump, p_init, 
                     p_trans_subj[a_idx], alpha_j_pop, beta_j_pop
                 )
+                states = states.astype(float)
+                states[np.array(seq['jumps']) <= 1.01e-3] = 2
                 padded_states = np.concatenate([[states[0]], states])
                 
                 px_list = coords[:, 1] # Column is X-axis
@@ -221,11 +224,27 @@ def plot_trajectories(sequences, map_params, out_dir):
                 # Plot the path line
                 ax.plot(px_list, py_list, color='gray', linewidth=1.5, alpha=0.6, zorder=1)
                 
+                # Add small arrows on the path lines to show direction of movement
+                diff_x = np.diff(px_list)
+                diff_y = np.diff(py_list)
+                mid_x = px_list[:-1] + diff_x / 2
+                mid_y = py_list[:-1] + diff_y / 2
+                norm = np.hypot(diff_x, diff_y)
+                valid_diff = (norm > 0)
+                if np.any(valid_diff):
+                    ax.quiver(mid_x[valid_diff], mid_y[valid_diff], 
+                              diff_x[valid_diff]/norm[valid_diff], diff_y[valid_diff]/norm[valid_diff], 
+                              color='gray', alpha=0.8, pivot='mid', scale=35, headwidth=5, headlength=6, width=0.005, zorder=1.5)
+                
+                # Jitter coordinates slightly so overlapping points at the same location become visible
+                jitter = np.random.uniform(-0.15, 0.15, size=coords.shape)
+                plot_coords = coords + jitter
+                
                 # Scatter points colored by STATE, shaped by state
-                for k in range(2):
+                for k in range(3):
                     mask = (padded_states == k)
                     if np.any(mask):
-                        sc = ax.scatter(coords[mask, 1], coords[mask, 0], c=colors[k], 
+                        sc = ax.scatter(plot_coords[mask, 1], plot_coords[mask, 0], c=colors[k], 
                                         marker=markers[k], s=100, edgecolor='black', zorder=2)
                                    
                 # Mark start/end uniquely with a star or square
@@ -244,14 +263,13 @@ def plot_trajectories(sequences, map_params, out_dir):
         legend_elements = [
             Line2D([0], [0], marker='o', color='w', markerfacecolor=c0, markersize=12, label='Local Exploration'),
             Line2D([0], [0], marker='^', color='w', markerfacecolor=c1, markersize=12, label='Global Exploration'),
+            Line2D([0], [0], marker='P', color='w', markerfacecolor=c2, markersize=14, label='Exploitation'),
             Line2D([0], [0], marker='*', color='w', markerfacecolor='white', markeredgecolor='black', markersize=18, label='Start'),
             Line2D([0], [0], marker='s', color='w', markerfacecolor='white', markeredgecolor='black', markersize=12, label='End')
         ]
-        fig.legend(handles=legend_elements, loc='lower center', ncol=4, bbox_to_anchor=(0.5, 0.01), fontsize=16)
+        fig.legend(handles=legend_elements, loc='lower center', ncol=5, bbox_to_anchor=(0.5, 0.01), fontsize=16)
         
-        plt.tight_layout(rect=[0, 0.06, 1, 0.95])
-        # Apply tight layout to bring subplots closer
-        fig.tight_layout(w_pad=0.4, h_pad=1.0)
-        plt.subplots_adjust(top=0.92) # Leave space for suptitle
+        # Apply tight layout with rect to leave space for title (top) and legend (bottom)
+        fig.tight_layout(rect=[0, 0.08, 1, 0.95], w_pad=0.4, h_pad=1.0)
         plt.savefig(os.path.join(out_dir, f"group_{group_id}_trajectories.png"), bbox_inches='tight', dpi=300)
         plt.close(fig)

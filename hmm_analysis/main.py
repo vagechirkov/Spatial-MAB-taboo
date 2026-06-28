@@ -11,6 +11,7 @@ from decoding import decode_states
 from plotting import plot_forest, plot_trajectories, plot_trace, plot_state_characteristics
 from transition_prediction_model import predict_transitions
 from foraging_analysis import analyze_foraging
+from transition_performance_correlation import analyze_transition_performance_correlation
 from draw_model import generate_model_diagram
 
 def main():
@@ -80,6 +81,11 @@ def main():
             map_params['p_trans_subj'][a_idx],
             map_params['alpha_j_pop'], map_params['beta_j_pop']
         )
+        
+        # Identify Exploitation (jump exactly 0, which was replaced by 1e-3 in data prep)
+        states = states.astype(float)
+        states[np.array(seq['jumps']) <= 1.01e-3] = 2
+        
         for i in range(len(states)):
             decoded_rows.append({
                 'group': seq['group'],
@@ -111,6 +117,9 @@ def main():
     
     print("\nPerforming Optimal Foraging Analysis (Beta Regression)...")
     analyze_foraging(viterbi_df_path)
+    
+    print("\nPerforming Transition Performance Correlation Analysis...")
+    analyze_transition_performance_correlation(out_dir)
     
     print(f"\nPipeline Complete! All results saved to {out_dir}")
 

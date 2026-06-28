@@ -23,8 +23,8 @@ def analyze_foraging(decoded_csv_path):
     for name, group_df in grouped:
         group_df = group_df.sort_values('trial')
         
-        # p(Global Exploration)
-        p_global_exploration = group_df['hidden_state'].mean()
+        # Number of Global Exploration steps (state 1)
+        n_global_exploration = (group_df['hidden_state'] == 1).sum()
         
         # Cumulative reward - trial 1 reward
         if len(group_df) > 1:
@@ -44,27 +44,30 @@ def analyze_foraging(decoded_csv_path):
             round_stats.append({
                 'group': name[0],
                 'agent': name[1],
+                'participant_id': f"{name[0]}_{name[1]}",
                 'round': name[2],
-                'p_global_exploration': p_global_exploration,
+                'n_global_exploration': n_global_exploration,
                 'norm_cum_reward': norm_rew,
                 'adjusted_cum_rew': adjusted_cum_rew
             })
             
     stats_df = pd.DataFrame(round_stats)
+    stats_df['round_half'] = np.where(stats_df['round'] < 4, 'first_half', 'second_half')
     
-    # Bin p_global_exploration into 0.0-0.1, 0.1-0.2, 0.2-0.3, and >0.3
-    bins = [0.0, 0.1, 0.2, 0.3, 1.0]
-    labels = ['0.0-0.1', '0.1-0.2', '0.2-0.3', '>0.3']
-    stats_df['p_global_exploration_bin'] = pd.cut(stats_df['p_global_exploration'], bins=bins, labels=labels, include_lowest=True, right=True)
+    # Bin number of global exploration steps (0-1, 2-3, 4-5, 6-7, >=8)
+    bins = [-1, 1, 3, 5, 7, 100]
+    labels = ['0-1', '2-3', '4-5', '6-7', '>=8']
+    stats_df['n_global_exploration_bin'] = pd.cut(stats_df['n_global_exploration'], bins=bins, labels=labels, include_lowest=False, right=True)
     
     # Convert to string to ensure it is treated as categorical
-    stats_df['p_global_exploration_bin'] = stats_df['p_global_exploration_bin'].astype(str)
+    stats_df['n_global_exploration_bin'] = stats_df['n_global_exploration_bin'].astype(str)
     
-    # Bambi Beta Regression
+    # Bambi Beta Regression with new predictors
     print(f"Building Beta Regression for Optimal Foraging with Bambi ({len(stats_df)} rounds)...")
     
-    # Use categorical binned p_global_exploration as predictor
-    model = bmb.Model("norm_cum_reward ~ p_global_exploration_bin", stats_df, family="beta")
+    # Use categorical binned n_global_exploration as predictor, plus round_half and random effects
+    # model = bmb.Model("norm_cum_reward ~ n_global_exploration_bin + round_half + (1|participant_id)", stats_df, family="beta")
+    model = bmb.Model("norm_cum_reward ~ n_global_exploration_bin + (1|participant_id)", stats_df, family="beta")
     fitted = model.fit(draws=2000, tune=1000, chains=4, cores=4)
     
     print("\nBeta Regression Summary:")
@@ -72,43 +75,86 @@ def analyze_foraging(decoded_csv_path):
     print(summary)
     summary.to_csv(os.path.join(out_dir, "beta_regression_summary.csv"))
     
-    # Plotting using Bambi's plot_predictions
-    print("\nGenerating Posterior Predictive Plot with Bambi...")
-    
+    # Plotting matching the transition prediction theme
+    print("\nGenerating Posterior Predictive Plot...")
     try:
-        plot_obj = bmb.interpret.plot_predictions(
-            model, 
-            fitted, 
-            conditional="p_global_exploration_bin",
-            prob=0.95
-        )
+        valid_labels = [l for l in labels if l in stats_df['n_global_exploration_bin'].values]
         
-        if hasattr(plot_obj, 'layout'):
-            plot_obj = plot_obj.layout(size=(10, 6))
-            
-        if hasattr(plot_obj, 'theme'):
-            plot_obj = plot_obj.theme({"axes.grid": True, "grid.alpha": 0.5, "axes.spines.right": False, "axes.spines.top": False, "font.size": 14})
-            
-        if hasattr(plot_obj, 'label'):
-            plot_obj = plot_obj.label(x="Proportion of Global Exploration (Binned)", y="Expected Normalized Cumulative Reward")
+        intercept = fitted.posterior['Intercept'].values
         
-        # In Bambi 0.18+, this returns a seaborn.objects.Plot instance
-        if hasattr(plot_obj, 'save'):
-            plot_obj.save(os.path.join(out_dir, "optimal_foraging_posterior_predictive.png"))
-        else:
-            # Fallback if it somehow returned matplotlib axes
-            if isinstance(plot_obj, tuple):
-                fig = plot_obj[0]
-            elif hasattr(plot_obj, 'figure'):
-                fig = plot_obj.figure
+        # Determine beta_round
+        if 'round_half' in fitted.posterior:
+            if hasattr(fitted.posterior['round_half'], 'round_half_dim'):
+                beta_round = fitted.posterior['round_half'].sel(round_half_dim='second_half').values
             else:
-                fig = plt.gcf()
-            fig.savefig(os.path.join(out_dir, "optimal_foraging_posterior_predictive.png"), bbox_inches='tight')
+                beta_round = fitted.posterior['round_half'].values
+        elif 'round_half[second_half]' in fitted.posterior:
+            beta_round = fitted.posterior['round_half[second_half]'].values
+        else:
+            beta_round = np.zeros_like(intercept)
             
-        plt.close('all')
+        fig, ax = plt.subplots(figsize=(8, 6))
+        x_positions = np.arange(len(labels))
         
+        # for half, color, beta_r in [('First Half (Rounds 1-4)', 'blue', 0), ('Second Half (Rounds 5-8)', 'orange', beta_round)]:
+        for half, color, beta_r in [('Posterior Mean ± 90% HPDI', 'purple', 0)]:
+            mu_mean_list = []
+            mu_lower_list = []
+            mu_upper_list = []
+            
+            for label in labels:
+                if label not in valid_labels:
+                    mu_mean_list.append(np.nan)
+                    mu_lower_list.append(np.nan)
+                    mu_upper_list.append(np.nan)
+                    continue
+                
+                # Retrieve bin coefficient
+                beta_bin = np.zeros_like(intercept)
+                if 'n_global_exploration_bin' in fitted.posterior:
+                    if hasattr(fitted.posterior['n_global_exploration_bin'], 'n_global_exploration_bin_dim'):
+                        if label in fitted.posterior['n_global_exploration_bin'].coords['n_global_exploration_bin_dim'].values:
+                            beta_bin = fitted.posterior['n_global_exploration_bin'].sel(n_global_exploration_bin_dim=label).values
+                elif f'n_global_exploration_bin[{label}]' in fitted.posterior:
+                    beta_bin = fitted.posterior[f'n_global_exploration_bin[{label}]'].values
+                
+                logits = intercept + beta_bin + beta_r
+                mu = 1 / (1 + np.exp(-logits))
+                
+                mu_mean_list.append(mu.mean())
+                mu_lower_list.append(np.percentile(mu, 5))
+                mu_upper_list.append(np.percentile(mu, 95))
+                
+            mu_mean = np.array(mu_mean_list)
+            mu_lower = np.array(mu_lower_list)
+            mu_upper = np.array(mu_upper_list)
+            
+            valid_mask = ~np.isnan(mu_mean)
+            x_valid = x_positions[valid_mask]
+            
+            yerr_lower = mu_mean[valid_mask] - mu_lower[valid_mask]
+            yerr_upper = mu_upper[valid_mask] - mu_mean[valid_mask]
+            
+            ax.errorbar(x_valid, mu_mean[valid_mask], yerr=[yerr_lower, yerr_upper], 
+                        color=color, linewidth=2, marker='o', markersize=8, 
+                        capsize=5, capthick=2, elinewidth=2, label=half)
+            
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(labels, rotation=45, ha='right')
+        ax.set_title("Optimal Foraging: Reward vs Global Exploration", fontsize=16)
+        ax.set_xlabel("Number of Global Exploration Steps", fontsize=14)
+        ax.set_ylabel("Norm. Cum. Reward (Trial 1 Subtracted)", fontsize=14)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper right')
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, "optimal_foraging_posterior_predictive.png"), bbox_inches='tight', dpi=150)
+        plt.close('all')
+            
     except Exception as e:
         print(f"Could not generate posterior predictive plot: {e}")
+        import traceback
+        traceback.print_exc()
         
     print("Optimal foraging analysis completed.")
 

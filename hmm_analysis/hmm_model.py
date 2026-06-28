@@ -172,7 +172,7 @@ def sample_model(hmm_model):
         
         print(f"Using {use_cores} cores and {use_cores} chains out of {total_cores} available.")
         
-        trace = pm.sample(draws=50, tune=20, chains=use_cores, cores=use_cores, 
+        trace = pm.sample(draws=5000, tune=1000, chains=use_cores, cores=use_cores, 
                           return_inferencedata=True, progressbar=True,
                           init='jitter+adapt_diag', target_accept=0.98)
     return trace
