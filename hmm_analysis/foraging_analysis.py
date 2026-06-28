@@ -68,7 +68,7 @@ def analyze_foraging(decoded_csv_path):
     # Use categorical binned n_global_exploration as predictor, plus round_half and random effects
     # model = bmb.Model("norm_cum_reward ~ n_global_exploration_bin + round_half + (1|participant_id)", stats_df, family="beta")
     model = bmb.Model("norm_cum_reward ~ n_global_exploration_bin + (1|participant_id)", stats_df, family="beta")
-    fitted = model.fit(draws=2000, tune=1000, chains=4, cores=4)
+    fitted = model.fit(draws=5000, tune=1000, chains=20, cores=20)
     
     print("\nBeta Regression Summary:")
     summary = az.summary(fitted)

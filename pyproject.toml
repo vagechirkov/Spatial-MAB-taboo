@@ -27,6 +27,7 @@ dependencies = [
     "graphviz>=0.21",
     "statsmodels>=0.14.6",
     "bambi>=0.18.0",
+    "numpyro>=0.21.0",
 ]
 
 [project.optional-dependencies]

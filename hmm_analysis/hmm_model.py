@@ -116,8 +116,8 @@ def build_hierarchical_model(data_dict):
         # mu_rg_subj_1 = pm.math.invlogit(logit(mu_rg_pop_1) + offset_rg_1 * sigma_rg[1])
         # mu_rg_subj = pm.Deterministic('mu_rg_subj', pt.stack([mu_rg_subj_0, mu_rg_subj_1], axis=1))
         
-        # Global kappa for jumps
-        log_kappa_jump_pop = pm.Normal('log_kappa_jump_pop', mu=np.log(10), sigma=1, shape=2)
+        # Global kappa for jumps (shared across states to prevent divergence/multimodality)
+        log_kappa_jump_pop = pm.Normal('log_kappa_jump_pop', mu=np.log(10), sigma=1)
         kappa_jump_pop = pm.Deterministic('kappa_jump_pop', pt.exp(log_kappa_jump_pop))
         
         # Hierarchical kappa commented out for better convergence
@@ -172,7 +172,9 @@ def sample_model(hmm_model):
         
         print(f"Using {use_cores} cores and {use_cores} chains out of {total_cores} available.")
         
-        trace = pm.sample(draws=5000, tune=1000, chains=use_cores, cores=use_cores, 
+        trace = pm.sample(draws=2000, tune=1000, chains=use_cores, cores=use_cores, 
                           return_inferencedata=True, progressbar=True,
-                          init='jitter+adapt_diag', target_accept=0.98)
+                          # nuts_sampler="numpyro",
+                          # init='jitter+adapt_diag',
+                          target_accept=0.95)
     return trace
