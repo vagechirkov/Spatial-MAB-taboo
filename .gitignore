@@ -318,7 +318,10 @@ abm/sbi-simulations
 *.csv
 .vscode
 *.png
+*.pdf
 mab_logs
 *.zip
 wandb
 *.pt
+old_sbi_pipeline/
+sbi-logs/
