@@ -252,14 +252,14 @@ def import_experiment(input_path: Path, outdir: Path) -> Tuple[pd.DataFrame, pd.
         # This supports Prolific-style CSVs such as:
         #   id, workerID, experimentData, reward
         # and also exports using PROLIFIC_PID/STUDY_ID/SESSION_ID.
-        for key in ("id", "workerID", "PROLIFIC_PID", "STUDY_ID", "SESSION_ID"):
+        for key in ("id", "STUDY_ID", "SESSION_ID"): #"workerID", "PROLIFIC_PID", 
             if key in row and pd.notna(row[key]):
                 meta[key] = row[key]
 
         # If the export uses PROLIFIC_PID but no workerID column, mirror it into
         # workerID so downstream scripts have a consistent participant column.
-        if "workerID" not in meta and "PROLIFIC_PID" in meta:
-            meta["workerID"] = meta["PROLIFIC_PID"]
+        # if "workerID" not in meta and "PROLIFIC_PID" in meta:
+        #     meta["workerID"] = meta["PROLIFIC_PID"]
 
         # Prefer server/payment-column reward if present, otherwise JSON reward.
         if "reward" in row and pd.notna(row["reward"]):
@@ -270,7 +270,7 @@ def import_experiment(input_path: Path, outdir: Path) -> Tuple[pd.DataFrame, pd.
 
         payment_rows.append({
             "id": meta.get("id", part_index),
-            "workerID": meta.get("workerID", meta.get("PROLIFIC_PID", part_index)),
+            # "workerID": meta.get("workerID", meta.get("PROLIFIC_PID", part_index)),
             "reward": meta.get("reward", part_data.get("reward", np.nan)),
         })
 
