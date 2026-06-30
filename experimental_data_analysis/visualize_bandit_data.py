@@ -2,9 +2,11 @@
 """
 Visualize bandit task behavior against reward environments.
 
-Creates one combined, multi-panel figure per visualization type:
+Creates separate participant-level outputs. For each participant ID found in the
+CSV, it writes one combined, multi-panel figure per visualization type:
   1. <participant-tag>_heatmaps_all_envs.png
-     One heatmap subplot per environment/grid, with choice paths overlaid.
+     One heatmap subplot per environment/grid, with that participant's choice
+     paths overlaid.
   2. <participant-tag>_normalized_rewards_all_envs.png
      One reward-over-trials subplot per environment/grid. Rewards are normalized
      to [0, 1] using the min and max payoff available on that grid.
@@ -16,8 +18,8 @@ Creates one combined, multi-panel figure per visualization type:
      the choice is within --max-radius of the global maximum or within
      --max-radius of one of the top-N local maxima excluding the global maximum.
 
-Also writes <participant-tag>_behavior_with_peak_flags.csv, which is the input behavioral CSV plus
-these derived columns:
+Also writes <participant-tag>_behavior_with_peak_flags.csv for each participant,
+which is that participant's behavioral CSV plus these derived columns:
   - global_max_x, global_max_y
   - top_local_max_coords
   - hit_global_max
@@ -292,6 +294,46 @@ def participant_filename_tag(df: pd.DataFrame, id_col: str = "participant_index"
     return "all-participants"
 
 
+
+
+def choose_participant_id_col(df: pd.DataFrame, requested: Optional[str] = None) -> str:
+    """Choose the participant identifier column for per-participant outputs.
+
+    Default priority is workerID, PROLIFIC_PID, id, then participant_index. The
+    import script preserves id and workerID from raw Prolific-style CSVs, so
+    workerID will usually be used automatically.
+    """
+    if requested:
+        if requested not in df.columns:
+            raise ValueError(f"Participant ID column not found: {requested}")
+        return requested
+
+    for col in ["workerID", "PROLIFIC_PID", "id", "participant_index"]:
+        if col in df.columns:
+            return col
+
+    raise ValueError(
+        "Could not find a participant ID column. Expected one of: "
+        "workerID, PROLIFIC_PID, id, participant_index."
+    )
+
+
+def iter_participant_frames(
+    df: pd.DataFrame,
+    id_col: str,
+    only_participant_id: Optional[str] = None,
+) -> Iterable[Tuple[object, pd.DataFrame]]:
+    """Yield one dataframe per participant ID."""
+    work = df.copy()
+    if only_participant_id is not None:
+        work = work[work[id_col].astype(str) == str(only_participant_id)]
+        if work.empty:
+            raise ValueError(f"No rows found for {id_col}={only_participant_id}")
+
+    for pid, participant_df in work.groupby(id_col, sort=True, dropna=False):
+        yield pid, participant_df.copy()
+
+
 def flatten_axes(axes) -> List[plt.Axes]:
     return list(np.asarray(axes).reshape(-1))
 
@@ -511,16 +553,13 @@ def main() -> None:
     parser.add_argument("--grid-dir", type=Path, help="Directory containing the JSON grid files from gridLoader.js")
     parser.add_argument("--env-file", type=Path, help="Single JSON environment file, used as fallback/demo environment")
     parser.add_argument("--out-dir", type=Path, default=Path("figures"), help="Directory for PNG outputs and annotated CSV")
-    parser.add_argument("--participant", type=int, help="Optional participant_index to plot")
+    parser.add_argument("--participant", type=int, help="Optional participant_index to plot; kept for backward compatibility")
+    parser.add_argument("--participant-id", help="Optional participant identifier value to plot, using --participant-id-col or the auto-selected ID column")
+    parser.add_argument("--participant-id-col", help="Column used to split outputs by participant; default priority: workerID, PROLIFIC_PID, id, participant_index")
     parser.add_argument("--block", type=int, help="Optional block to plot")
     parser.add_argument("--top-local", type=int, default=3, help="Number of local maxima to flag, excluding the global max")
     parser.add_argument("--max-radius", type=float, default=1.0, help="Euclidean radius around global/local maxima counted as a hit")
     parser.add_argument("--max-cols", type=int, default=5, help="Maximum columns in combined subplot figures")
-    parser.add_argument(
-        "--filename-id-col",
-        default="participant_index",
-        help="Column used to add participant ID to saved filenames",
-    )
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -537,6 +576,8 @@ def main() -> None:
         df = df[df["block"] == args.block]
     if df.empty:
         raise ValueError("No rows remain after participant/block filtering.")
+
+    participant_id_col = choose_participant_id_col(df, args.participant_id_col)
 
     # Ensure numeric plotting columns.
     for col in ["env", "trial", "choice_x", "choice_y", "score"]:
@@ -556,44 +597,51 @@ def main() -> None:
     else:
         print("Warning: no reaction-time column found; skipping reaction-time plot.")
 
-    filename_tag = participant_filename_tag(df, args.filename_id_col)
-    annotated_path = args.out_dir / f"{filename_tag}_behavior_with_peak_flags.csv"
-    df.to_csv(annotated_path, index=False)
-    heatmap_path = args.out_dir / f"{filename_tag}_heatmaps_all_envs.png"
-    rewards_path = args.out_dir / f"{filename_tag}_normalized_rewards_all_envs.png"
-    indicators_path = args.out_dir / f"{filename_tag}_maxima_indicators_all_envs.png"
+    n_participants = 0
+    for participant_id, participant_df in iter_participant_frames(df, participant_id_col, args.participant_id):
+        n_participants += 1
+        filename_tag = f"participant-{safe_filename_token(participant_id)}"
 
-    save_combined_heatmaps(df, envs, heatmap_path, max_cols=args.max_cols)
-    save_combined_line_panels(
-        df,
-        value_col="normalized_score",
-        out_path=rewards_path,
-        title="Normalized rewards",
-        y_label="Normalized reward",
-        ylim=(-0.05, 1.05),
-        step=False,
-        max_cols=args.max_cols,
-    )
-    save_combined_maxima_indicators(df, indicators_path, max_cols=args.max_cols)
+        annotated_path = args.out_dir / f"{filename_tag}_behavior_with_peak_flags.csv"
+        heatmap_path = args.out_dir / f"{filename_tag}_heatmaps_all_envs.png"
+        rewards_path = args.out_dir / f"{filename_tag}_normalized_rewards_all_envs.png"
+        indicators_path = args.out_dir / f"{filename_tag}_maxima_indicators_all_envs.png"
 
-    if rt_col is not None:
-        rt_path = args.out_dir / f"{filename_tag}_reaction_times_all_envs.png"
+        participant_df.to_csv(annotated_path, index=False)
+
+        save_combined_heatmaps(participant_df, envs, heatmap_path, max_cols=args.max_cols)
         save_combined_line_panels(
-            df,
-            value_col=rt_col,
-            out_path=rt_path,
-            title="Reaction times",
-            y_label=rt_col,
-            ylim=None,
+            participant_df,
+            value_col="normalized_score",
+            out_path=rewards_path,
+            title=f"Normalized rewards: {participant_id_col}={participant_id}",
+            y_label="Normalized reward",
+            ylim=(-0.05, 1.05),
             step=False,
             max_cols=args.max_cols,
         )
-        print(f"Wrote reaction-time plot: {rt_path}")
+        save_combined_maxima_indicators(participant_df, indicators_path, max_cols=args.max_cols)
 
-    print(f"Wrote annotated data: {annotated_path}")
-    print(f"Wrote heatmap plot: {heatmap_path}")
-    print(f"Wrote normalized reward plot: {rewards_path}")
-    print(f"Wrote maxima indicator plot: {indicators_path}")
+        if rt_col is not None:
+            rt_path = args.out_dir / f"{filename_tag}_reaction_times_all_envs.png"
+            save_combined_line_panels(
+                participant_df,
+                value_col=rt_col,
+                out_path=rt_path,
+                title=f"Reaction times: {participant_id_col}={participant_id}",
+                y_label=rt_col,
+                ylim=None,
+                step=False,
+                max_cols=args.max_cols,
+            )
+            print(f"Wrote reaction-time plot: {rt_path}")
+
+        print(f"Wrote annotated data: {annotated_path}")
+        print(f"Wrote heatmap plot: {heatmap_path}")
+        print(f"Wrote normalized reward plot: {rewards_path}")
+        print(f"Wrote maxima indicator plot: {indicators_path}")
+
+    print(f"Finished {n_participants} participant-level output set(s) using ID column: {participant_id_col}")
 
 
 if __name__ == "__main__":

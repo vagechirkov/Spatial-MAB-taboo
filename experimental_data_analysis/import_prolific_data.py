@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-Updated on Mon Jun 29 18:10 2026
-
-@author: Alex
-
 Import Prolific/social-continuity bandit experiment data.
+
+This version preserves raw-export id and workerID columns in the main, tutorial,
+and bonus outputs whenever they are present in the source CSV.
 
 Supports both:
   1. the older CSV export format with an experimentData JSON column, and
-  2. the newer raw JSON/.bin output 
+  2. the newer raw JSON/.bin example output produced by script.js.
 
 The newer script records one automatic reveal at trial/click 0 for each bandit,
 then participant clicks numbered 1..50. It also records RT/clickTimestamp and
@@ -24,7 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
+import pandas as pd    
+from pathlib import Path
 
 
 MAIN_LIST_FIELDS = {
@@ -234,7 +234,7 @@ def _add_search_dist(df: pd.DataFrame, group_cols: List[str], x_col: str = "choi
     return df
 
 
-def import_experiment(input_path: Path, output_dir: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def import_experiment(input_path: Path, outdir: Path) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     records = _read_records(input_path)
     main_parts: List[pd.DataFrame] = []
     tutorial_parts: List[pd.DataFrame] = []
@@ -248,9 +248,19 @@ def import_experiment(input_path: Path, output_dir: Path) -> Tuple[pd.DataFrame,
         part_data = _rename_aliases(part_data)
 
         meta = {}
+        # Keep participant identifiers from the raw export on every output row.
+        # This supports Prolific-style CSVs such as:
+        #   id, workerID, experimentData, reward
+        # and also exports using PROLIFIC_PID/STUDY_ID/SESSION_ID.
         for key in ("id", "workerID", "PROLIFIC_PID", "STUDY_ID", "SESSION_ID"):
             if key in row and pd.notna(row[key]):
                 meta[key] = row[key]
+
+        # If the export uses PROLIFIC_PID but no workerID column, mirror it into
+        # workerID so downstream scripts have a consistent participant column.
+        if "workerID" not in meta and "PROLIFIC_PID" in meta:
+            meta["workerID"] = meta["PROLIFIC_PID"]
+
         # Prefer server/payment-column reward if present, otherwise JSON reward.
         if "reward" in row and pd.notna(row["reward"]):
             meta["reward"] = row["reward"]
@@ -259,6 +269,7 @@ def import_experiment(input_path: Path, output_dir: Path) -> Tuple[pd.DataFrame,
         tutorial_parts.append(_tutorial_dataframe(part_data, meta, part_index))
 
         payment_rows.append({
+            "id": meta.get("id", part_index),
             "workerID": meta.get("workerID", meta.get("PROLIFIC_PID", part_index)),
             "reward": meta.get("reward", part_data.get("reward", np.nan)),
         })
@@ -281,27 +292,41 @@ def import_experiment(input_path: Path, output_dir: Path) -> Tuple[pd.DataFrame,
 
     payment_df = pd.DataFrame(payment_rows)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    main_df.to_csv(output_dir / f"{input_path.stem}.csv", index=False)
-    if not tutorial_df.empty:
-        tutorial_df.to_csv(output_dir / f"{input_path.stem}_tutorial.csv", index=False)
-    payment_df.to_csv(output_dir / f"{input_path.stem}_bonus.txt", sep=",", index=False)
+    outdir.mkdir(parents=True, exist_ok=True)
 
+    stem = input_path.stem
+
+    main_df.to_csv(outdir / f"{stem}.csv", index=False)
+
+    if not tutorial_df.empty:
+        tutorial_df.to_csv(outdir / f"{stem}_tutorial.csv", index=False)
+
+    payment_df.to_csv(outdir / f"{stem}_bonus.txt",
+                      sep="\t", index=False)
+
+    return main_df, tutorial_df, payment_df
     return main_df, tutorial_df, payment_df
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import social-continuity bandit Prolific data")
-    parser.add_argument("input", nargs="?", default="../data/pilot_asocial/raw/beta_test_2026.06.29.bin", help="CSV, JSON, JSONL, or .bin input file")
+    parser.add_argument("input", nargs="?", default="../data/pilot_asocial/raw/mexicanHat_pilot.csv", help="CSV, JSON, JSONL, or .bin input file")
     parser.add_argument("--outdir", default="../data/pilot_asocial/csv", help="Directory for output CSV files")
     args = parser.parse_args()
-    filename = Path(args.input).stem
-    main_df, tutorial_df, payment_df = import_experiment(Path(args.input), Path(args.outdir))
-    print(f"Wrote {len(main_df)} main rows to {Path(args.outdir) / filename}.csv")
-    if not tutorial_df.empty:
-        print(f"Wrote {len(tutorial_df)} tutorial rows to {Path(args.outdir) / filename}_tutorial.csv")
-    print(f"Wrote {len(payment_df)} payment rows to {Path(args.outdir) / filename}_bonus.txt")
 
+    input_path = Path(args.input)
+    outdir = Path(args.outdir)
+
+    main_df, tutorial_df, payment_df = import_experiment(input_path, outdir)
+
+    stem = input_path.stem
+
+    print(f"Wrote {len(main_df)} main rows to {outdir / f'{stem}.csv'}")
+
+    if not tutorial_df.empty:
+        print(f"Wrote {len(tutorial_df)} tutorial rows to {outdir / f'{stem}_tutorial.csv'}")
+
+    print(f"Wrote {len(payment_df)} payment rows to {outdir / f'{stem}_bonus.txt'}")
 
 if __name__ == "__main__":
     main()
