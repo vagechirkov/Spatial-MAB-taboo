@@ -19,7 +19,7 @@ from .rewards_clean import create_mexican_hat_gp_set
 from .reporter_helpers import (
     find_global_peak_coordinates,
     find_local_peak_coordinates,
-    min_distance_to_points,
+    make_peak_agent_reporters,
     normalize_reporter_selection,
 )
 
@@ -311,67 +311,12 @@ class SocialGPModel(mesa.Model):
             for agent in self.grid.agents
         }
 
-        def distance_choice_to_global_peak_region(agent, choice):
-            """Distance from a choice coordinate to the global-peak region boundary."""
-            if choice is None:
-                return np.inf
-
-            has_global_peak_region = (
-                hasattr(self, 'reward_peak')
-                and self.reward_peak is not None
-                and hasattr(self, 'peak_radius')
-                and self.peak_radius is not None
-            )
-
-            if has_global_peak_region:
-                choice_arr = np.array(choice)
-                peak = np.array(self.reward_peak)
-                radius = self.peak_radius
-                dist_to_center = np.linalg.norm(choice_arr - peak)
-                return max(0.0, dist_to_center - radius)
-
-            peak_coords = self.global_peak_coordinates.get(agent.unique_id, [])
-            return min_distance_to_points(choice, peak_coords)
-
-        def distance_to_global_peak_region(agent):
-            """Distance from last choice to the global-peak region boundary."""
-            return distance_choice_to_global_peak_region(agent, agent.last_choice)
-
-        def is_choice_at_global_max(agent, choice):
-            """1 if a choice is in the global-peak neighborhood, else 0."""
-            return int(
-                distance_choice_to_global_peak_region(agent, choice)
-                <= self.global_peak_report_radius
-            )
-
-        def is_at_global_max(agent):
-            """1 if the last choice is in the global-peak neighborhood, else 0."""
-            return is_choice_at_global_max(agent, agent.last_choice)
-
-        def distance_choice_to_nearest_local_peak(agent, choice):
-            """Distance from a choice coordinate to the nearest detected local peak."""
-            peak_coords = self.local_peak_coordinates.get(agent.unique_id, [])
-            return min_distance_to_points(choice, peak_coords)
-
-        def distance_to_nearest_local_peak(agent):
-            """Distance from last choice to nearest detected local peak."""
-            return distance_choice_to_nearest_local_peak(agent, agent.last_choice)
-
-        def is_at_local_max(agent):
-            """
-            1 if the last choice is near a detected local peak.
-
-            Global max has priority: if an agent is classified as global, local is forced to 0.
-            """
-            if is_choice_at_global_max(agent, agent.last_choice):
-                return 0
-            return int(
-                distance_choice_to_nearest_local_peak(agent, agent.last_choice) <= self.local_peak_report_radius
-            )
-
-        def is_not_at_any_max(agent):
-            """1 if the last choice is not near any global/local peak, else 0."""
-            return int((is_at_global_max(agent) == 0) and (is_at_local_max(agent) == 0))
+        peak_agent_reporters = make_peak_agent_reporters(
+            self.global_peak_coordinates,
+            self.local_peak_coordinates,
+            global_radius=self.global_peak_report_radius,
+            local_radius=self.local_peak_report_radius,
+        )
 
         available_model_reporters = {
             "mean_cumulative_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) + 0.5 * m.steps,
@@ -406,12 +351,8 @@ class SocialGPModel(mesa.Model):
                 "policy": lambda a: a.policy_grid,
                 "value": lambda a: a.ucb_grid,
                 "choice": lambda a: a.last_choice,
-                "global_max": lambda a: is_at_global_max(a),
-                "local_max": lambda a: is_at_local_max(a),
-                "no_max": lambda a: is_not_at_any_max(a),
                 "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
-                "distance_to_global_peak": lambda a: distance_to_global_peak_region(a),
-                "distance_to_local_peak": lambda a: distance_to_nearest_local_peak(a),
+                **peak_agent_reporters,
             }
 
             if agent_reporters_to_collect is None:
