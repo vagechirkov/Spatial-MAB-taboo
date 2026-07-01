@@ -22,6 +22,79 @@ def gp_base_generalization(
     gpr.fit(X_obs, y_obs)
     return gpr.predict(X_predict, return_std=True)
 
+def make_mh_prior_mean_fn(mh_kernel_scaled: np.ndarray) -> callable:
+    """
+    Wrap the scaled Mexican Hat grid as a callable prior mean function.
+
+    Parameters
+    ----------
+    mh_kernel_scaled : ndarray of shape (grid_size, grid_size)
+        The mh_kernel_scaled returned by create_mexican_hat_gp_single.
+        If any normalization is applied to the combined landscape after
+        generation, the same normalization must be applied here first,
+        otherwise the prior mean will be on a different scale than the
+        observations the GP receives.
+
+    Returns
+    -------
+    prior_mean_fn : callable (n, 2) -> (n,)
+        Evaluates the Mexican Hat prior mean at arbitrary grid coordinates.
+        Coordinates are cast to int, so float inputs are floored — pass
+        exact integer coordinates to avoid ambiguity.
+    """
+    def prior_mean_fn(X: np.ndarray) -> np.ndarray:
+        rows = X[:, 0].astype(int)
+        cols = X[:, 1].astype(int)
+        return mh_kernel_scaled[rows, cols]
+
+    return prior_mean_fn
+
+def gp_oracle_generalization(
+    X_obs: np.ndarray,
+    y_obs: np.ndarray,
+    X_predict: np.ndarray,
+    kernel: Kernel,
+    observation_noise: np.ndarray | float,
+    rng,
+    prior_mean_fn: callable = None,
+):
+    """
+    Fit a GP with an optional prior mean function and return μ, σ on the
+    prediction grid.
+
+    Standard agent  : omit prior_mean_fn → zero-mean GP, original behavior.
+    Oracle GP-UCB   : pass prior_mean_fn from make_mh_prior_mean_fn.
+
+    The GP is fit on the mean-subtracted residuals (y - μ₀(X_obs)).
+    The prior mean is added back to the posterior mean at prediction time.
+    Posterior variance is unaffected by the prior mean — it depends only
+    on the kernel and the spatial configuration of observations.
+
+    Parameters
+    ----------
+    prior_mean_fn : callable (n, 2) -> (n,), optional
+        Evaluates the deterministic prior mean at a set of grid coordinates.
+        When None, the prior mean is zero everywhere (standard behavior).
+    """
+    if prior_mean_fn is not None:
+        y_residual = y_obs - prior_mean_fn(X_obs)
+        mu_prior_pred = prior_mean_fn(X_predict)
+    else:
+        y_residual = y_obs
+        mu_prior_pred = 0.0
+
+    gpr = GaussianProcessRegressor(
+        kernel=kernel,
+        alpha=observation_noise,
+        random_state=rng,
+        optimizer=None,
+        normalize_y=False,
+    )
+    gpr.fit(X_obs, y_residual)
+    mu_pred, sigma_pred = gpr.predict(X_predict, return_std=True)
+
+    return mu_pred + mu_prior_pred, sigma_pred
+
 def value_shaping(
     X_obs_private: np.ndarray,
     y_obs_private: np.ndarray,
@@ -76,7 +149,7 @@ def value_shaping(
     else:
         value_final = value_ucb_private
 
-    # Edited 2026.02.25: Return raw values instead of probabilities for visualization
+    # Edited 2026.02.25: Return raw values instead of probabilities for visualization. Original logic added to line 198-200
     return value_final
     # logits = value_final / tau
     # logits = np.clip(logits, -40, 40)
