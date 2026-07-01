@@ -56,6 +56,13 @@ import pandas as pd
 
 Coord = Tuple[int, int]
 
+NOTEBOOK_VISUALIZATIONS = [
+    "choice_heatmaps",
+    "normalized_rewards",
+    "reaction_times",
+    "search_distance",
+]
+
 
 def parse_json_grid_files(grid_loader_path: Path) -> List[str]:
     """Extract active jsonGridFiles from gridLoader.js, ignoring comments."""
@@ -546,6 +553,517 @@ def save_combined_maxima_indicators(
     plt.close(fig)
 
 
+def compute_search_distance(df: pd.DataFrame) -> pd.Series:
+    """Compute per-trial search distance from the previous choice in each trajectory."""
+    work = df.copy()
+    for col in ["trial", "choice_x", "choice_y"]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    work = work.sort_values(["participant_index", "block", "env", "trial"], kind="mergesort")
+    distances = pd.Series(np.nan, index=work.index, dtype=float)
+
+    for _, traj in work.groupby(["participant_index", "block", "env"], sort=False, dropna=False):
+        ordered = traj.sort_values("trial")
+        if len(ordered) <= 1:
+            continue
+
+        prev_xy = ordered[["choice_x", "choice_y"]].shift(1)
+        curr_xy = ordered[["choice_x", "choice_y"]]
+        delta = (curr_xy - prev_xy).to_numpy(dtype=float)
+        dist = np.sqrt(np.sum(delta * delta, axis=1))
+        dist[0] = np.nan
+        distances.loc[ordered.index] = dist
+
+    return distances
+
+
+def prepare_bandit_data(
+    df: pd.DataFrame,
+    envs: Optional[Dict[int, pd.DataFrame]],
+    *,
+    top_n_local: int = 3,
+    max_radius: float = 3.0,
+    participant_id_col: Optional[str] = None,
+    participant_id: Optional[str] = None,
+    block: Optional[int] = None,
+    rt_col: Optional[str] = None,
+    ensure_numeric: bool = True,
+) -> pd.DataFrame:
+    """Prepare a bandit dataframe for notebook-style plotting and analysis."""
+    work = df.copy()
+
+    if participant_id is not None:
+        if participant_id_col is None:
+            participant_id_col = choose_participant_id_col(work)
+        if participant_id_col not in work.columns:
+            raise ValueError(f"Participant ID column not found: {participant_id_col}")
+        work = work[work[participant_id_col].astype(str) == str(participant_id)]
+        if work.empty:
+            raise ValueError(f"No rows found for {participant_id_col}={participant_id}")
+
+    if block is not None:
+        if "block" not in work.columns:
+            raise ValueError("block column not found")
+        work = work[work["block"] == block]
+        if work.empty:
+            raise ValueError(f"No rows remain after filtering for block={block}")
+
+    if ensure_numeric:
+        for col in ["env", "trial", "choice_x", "choice_y", "score"]:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+        work = work.dropna(subset=["env", "trial", "choice_x", "choice_y"])
+        work["env"] = work["env"].astype(int)
+        work["trial"] = work["trial"].astype(int)
+        work["choice_x"] = work["choice_x"].astype(int)
+        work["choice_y"] = work["choice_y"].astype(int)
+
+    if rt_col is None:
+        rt_col = find_rt_column(work)
+    if rt_col is not None and rt_col in work.columns:
+        work[rt_col] = pd.to_numeric(work[rt_col], errors="coerce")
+
+    work["search_distance"] = compute_search_distance(work)
+    if envs:
+        work = add_peak_flags(work, envs, top_n_local, max_radius)
+    elif "normalized_score" not in work.columns and "score" in work.columns:
+        work["normalized_score"] = pd.to_numeric(work["score"], errors="coerce")
+    return work.sort_values(["participant_index", "env", "block", "trial"], kind="mergesort").reset_index(drop=True)
+
+
+def plot_bandit_heatmaps(
+    df: pd.DataFrame,
+    envs: Dict[int, pd.DataFrame],
+    *,
+    max_cols: int = 5,
+    title: str = "Choices over environment heatmaps",
+    show: bool = False,
+):
+    """Plot a heatmap for each environment with choice trajectories overlaid."""
+    env_values = unique_envs_in_order(df)
+    nrows, ncols = subplot_grid(len(env_values), max_cols=max_cols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.0 * ncols + 0.8, 3.0 * nrows), squeeze=False)
+    axes_flat = flatten_axes(axes)
+
+    for ax, env_value in zip(axes_flat, env_values):
+        env_grid = choose_env(env_value, envs)
+        mat = grid_to_matrix(env_grid)
+        min_x, max_x = int(env_grid.x.min()), int(env_grid.x.max())
+        min_y, max_y = int(env_grid.y.min()), int(env_grid.y.max())
+
+        ax.imshow(
+            mat,
+            origin="lower",
+            extent=[min_x - 0.5, max_x + 0.5, min_y - 0.5, max_y + 0.5],
+            aspect="equal",
+        )
+
+        env_df = df[df["env"].astype(int) == env_value]
+        for traj in iter_trajectories(env_df):
+            ax.plot(
+                traj["choice_x"],
+                traj["choice_y"],
+                marker="o",
+                linewidth=0.8,
+                markersize=2.2,
+                color="black",
+                alpha=0.75,
+            )
+
+        ax.set_title(f"env {env_value}", fontsize=9)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+    for ax in axes_flat[len(env_values):]:
+        ax.axis("off")
+
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes_flat
+
+
+def plot_trial_series(
+    df: pd.DataFrame,
+    *,
+    value_col: str,
+    max_cols: int = 5,
+    title: Optional[str] = None,
+    show: bool = False,
+):
+    """Plot a per-trial series for each environment."""
+    env_values = unique_envs_in_order(df)
+    nrows, ncols = subplot_grid(len(env_values), max_cols=max_cols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2 * ncols, 2.2 * nrows), squeeze=False, sharex=True)
+    axes_flat = flatten_axes(axes)
+
+    for ax, env_value in zip(axes_flat, env_values):
+        env_df = df[df["env"].astype(int) == env_value]
+        for traj in iter_trajectories(env_df):
+            ax.plot(traj["trial"], traj[value_col], linewidth=0.9, alpha=0.65)
+
+        ax.set_title(f"env {env_value}", fontsize=9)
+        ax.grid(True, linewidth=0.25, alpha=0.35)
+
+    for ax in axes_flat[len(env_values):]:
+        ax.axis("off")
+
+    fig.supxlabel("Trial", fontsize=9)
+    fig.supylabel(value_col.replace("_", " "), fontsize=9)
+    fig.suptitle(title or f"{value_col} over trials", fontsize=11)
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes_flat
+
+
+def plot_reaction_times(
+    df: pd.DataFrame,
+    *,
+    rt_col: Optional[str] = None,
+    max_cols: int = 5,
+    title: Optional[str] = None,
+    show: bool = False,
+):
+    """Plot reaction-time traces for each environment."""
+    rt_col = rt_col or find_rt_column(df)
+    if rt_col is None:
+        raise ValueError("No reaction-time column was found in the dataframe")
+    return plot_trial_series(df, value_col=rt_col, max_cols=max_cols, title=title or f"{rt_col} over trials", show=show)
+
+
+def plot_search_distance(
+    df: pd.DataFrame,
+    *,
+    max_cols: int = 5,
+    title: str = "Search-distance traces",
+    show: bool = False,
+):
+    """Plot the distance between consecutive choices over trials."""
+    if "search_distance" not in df.columns:
+        df = df.copy()
+        df["search_distance"] = compute_search_distance(df)
+    return plot_trial_series(df, value_col="search_distance", max_cols=max_cols, title=title, show=show)
+
+
+def make_preliminary_visualizations(
+    df: pd.DataFrame,
+    envs: Optional[Dict[int, pd.DataFrame]],
+    *,
+    participant_id_col: Optional[str] = None,
+    participant_id: Optional[str] = None,
+    block: Optional[int] = None,
+    top_n_local: int = 3,
+    max_radius: float = 1.0,
+    max_cols: int = 5,
+    show: bool = False,
+):
+    """Create the core notebook visualizations for a prepared bandit dataframe."""
+    prepared = prepare_bandit_data(
+        df,
+        envs,
+        top_n_local=top_n_local,
+        max_radius=max_radius,
+        participant_id_col=participant_id_col,
+        participant_id=participant_id,
+        block=block,
+    )
+
+    figures = {}
+    if envs:
+        figures["choice_heatmaps"] = plot_bandit_heatmaps(prepared, envs, max_cols=max_cols, show=False)
+
+    if "normalized_score" in prepared.columns:
+        figures["normalized_rewards"] = plot_trial_series(
+            prepared,
+            value_col="normalized_score",
+            max_cols=max_cols,
+            title="Normalized rewards over trials",
+            show=False,
+        )
+    elif "score" in prepared.columns:
+        figures["normalized_rewards"] = plot_trial_series(
+            prepared,
+            value_col="score",
+            max_cols=max_cols,
+            title="Score over trials",
+            show=False,
+        )
+
+    rt_col = find_rt_column(prepared)
+    if rt_col is not None:
+        figures["reaction_times"] = plot_reaction_times(prepared, rt_col=rt_col, max_cols=max_cols, show=False)
+
+    figures["search_distance"] = plot_search_distance(prepared, max_cols=max_cols, show=False)
+
+    if show:
+        plt.show()
+    return prepared, figures
+
+
+def summarize_group_average_trends(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    trial_col: str = "trial",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return env-level and overall summaries for a trial-by-trial measure."""
+    if value_col not in df.columns:
+        raise ValueError(f"Value column not found: {value_col}")
+
+    pid_col = choose_participant_id_col(df, participant_id_col)
+    work = df[[pid_col, env_col, trial_col, value_col]].copy()
+    work[env_col] = pd.to_numeric(work[env_col], errors="coerce")
+    work[trial_col] = pd.to_numeric(work[trial_col], errors="coerce")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=[env_col, trial_col, value_col])
+
+    participant_means = (
+        work.groupby([env_col, trial_col, pid_col], dropna=False)[value_col]
+        .mean()
+        .reset_index(name="value")
+    )
+
+    def sem(values: pd.Series) -> float:
+        values = values.dropna()
+        if len(values) <= 1:
+            return 0.0
+        return float(values.std(ddof=1) / (len(values) ** 0.5))
+
+    env_summary = (
+        participant_means.groupby([env_col, trial_col], dropna=False)["value"]
+        .agg(mean="mean", sem=sem, n="count")
+        .reset_index()
+    )
+    overall_summary = (
+        env_summary.groupby(trial_col, dropna=False)[["mean", "sem", "n"]]
+        .agg(mean=("mean", "mean"), sem=("sem", "mean"), n=("n", "sum"))
+        .reset_index()
+    )
+    return env_summary, overall_summary
+
+
+def plot_group_average_trends(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    trial_col: str = "trial",
+    title: Optional[str] = None,
+    show: bool = False,
+):
+    """Plot env-level means with shaded error bands and a pooled grand-average trend."""
+    env_summary, overall_summary = summarize_group_average_trends(
+        df,
+        value_col,
+        participant_id_col=participant_id_col,
+        env_col=env_col,
+        trial_col=trial_col,
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharex=True, sharey=False)
+    axes = np.atleast_1d(axes)
+
+    for env_value, sub in env_summary.groupby(env_col, sort=True):
+        axes[0].plot(
+            sub[trial_col],
+            sub["mean"],
+            linewidth=1.2,
+            alpha=0.9,
+            label=f"env {int(env_value)}",
+        )
+        axes[0].fill_between(
+            sub[trial_col],
+            sub["mean"] - sub["sem"],
+            sub["mean"] + sub["sem"],
+            alpha=0.18,
+        )
+
+    axes[0].set_title("Mean across participants within each env")
+    axes[0].set_xlabel("Trial")
+    axes[0].set_ylabel(value_col.replace("_", " "))
+    axes[0].grid(True, alpha=0.3)
+    if len(env_summary[env_col].dropna().unique()) <= 6:
+        axes[0].legend(loc="best", fontsize=8)
+
+    axes[1].plot(
+        overall_summary[trial_col],
+        overall_summary["mean"],
+        linewidth=1.2,
+        alpha=0.9,
+        color="tab:purple",
+    )
+    axes[1].fill_between(
+        overall_summary[trial_col],
+        overall_summary["mean"] - overall_summary["sem"],
+        overall_summary["mean"] + overall_summary["sem"],
+        alpha=0.18,
+        color="tab:purple",
+    )
+    axes[1].set_title("Grand mean across envs")
+    axes[1].set_xlabel("Trial")
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle(title or f"{value_col} by trial (group means)")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def summarize_participant_average_trends(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    trial_col: str = "trial",
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Return participant-level and overall summaries for a trial-by-trial measure."""
+    if value_col not in df.columns:
+        raise ValueError(f"Value column not found: {value_col}")
+
+    pid_col = choose_participant_id_col(df, participant_id_col)
+    work = df[[pid_col, env_col, trial_col, value_col]].copy()
+    work[env_col] = pd.to_numeric(work[env_col], errors="coerce")
+    work[trial_col] = pd.to_numeric(work[trial_col], errors="coerce")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=[pid_col, env_col, trial_col, value_col])
+
+    participant_means = (
+        work.groupby([pid_col, trial_col], dropna=False)[value_col]
+        .mean()
+        .reset_index(name="mean")
+    )
+
+    def sem(values: pd.Series) -> float:
+        values = values.dropna()
+        if len(values) <= 1:
+            return 0.0
+        return float(values.std(ddof=1) / (len(values) ** 0.5))
+
+    participant_summary = (
+        work.groupby([pid_col, trial_col], dropna=False)[value_col]
+        .agg(mean="mean", sem=sem, n="count")
+        .reset_index()
+    )
+    overall_summary = (
+        participant_summary.groupby(trial_col, dropna=False)[["mean", "sem", "n"]]
+        .agg(mean=("mean", "mean"), sem=("sem", "mean"), n=("n", "sum"))
+        .reset_index()
+    )
+    return participant_summary, overall_summary
+
+
+def plot_participant_average_trends(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    trial_col: str = "trial",
+    title: Optional[str] = None,
+    show: bool = False,
+):
+    """Plot participant-level means across environments with shaded error bands and a grand mean."""
+    participant_summary, overall_summary = summarize_participant_average_trends(
+        df,
+        value_col,
+        participant_id_col=participant_id_col,
+        env_col=env_col,
+        trial_col=trial_col,
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharex=True, sharey=False)
+    axes = np.atleast_1d(axes)
+
+    for pid_value, sub in participant_summary.groupby(participant_id_col or choose_participant_id_col(df), sort=True):
+        axes[0].plot(
+            sub[trial_col],
+            sub["mean"],
+            linewidth=1.1,
+            alpha=0.85,
+            label=str(pid_value),
+        )
+        axes[0].fill_between(
+            sub[trial_col],
+            sub["mean"] - sub["sem"],
+            sub["mean"] + sub["sem"],
+            alpha=0.12,
+        )
+
+    axes[0].set_title("Mean across envs within each participant")
+    axes[0].set_xlabel("Trial")
+    axes[0].set_ylabel(value_col.replace("_", " "))
+    axes[0].grid(True, alpha=0.3)
+    if participant_summary.shape[0] <= 20:
+        axes[0].legend(loc="best", fontsize=8)
+
+    axes[1].plot(
+        overall_summary[trial_col],
+        overall_summary["mean"],
+        linewidth=1.2,
+        alpha=0.9,
+        color="tab:green",
+    )
+    axes[1].fill_between(
+        overall_summary[trial_col],
+        overall_summary["mean"] - overall_summary["sem"],
+        overall_summary["mean"] + overall_summary["sem"],
+        alpha=0.18,
+        color="tab:green",
+    )
+    axes[1].set_title("Grand mean across participants")
+    axes[1].set_xlabel("Trial")
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle(title or f"{value_col} by trial (participant means)")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def make_group_average_visualizations(
+    df: pd.DataFrame,
+    *,
+    participant_id_col: Optional[str] = None,
+    title_prefix: str = "Group-average",
+    show: bool = False,
+):
+    """Create a small suite of group-average plots for common bandit metrics."""
+    figures = {}
+    value_cols = []
+    if "normalized_score" in df.columns:
+        value_cols.append("normalized_score")
+    elif "score" in df.columns:
+        value_cols.append("score")
+
+    rt_col = find_rt_column(df)
+    if rt_col is not None:
+        value_cols.append(rt_col)
+
+    for col in ["hit_global_max", "hit_top_local_max", "search_distance"]:
+        if col in df.columns:
+            value_cols.append(col)
+
+    for value_col in value_cols:
+        figures[value_col] = plot_group_average_trends(
+            df,
+            value_col,
+            participant_id_col=participant_id_col,
+            title=f"{title_prefix}: {value_col}",
+            show=False,
+        )
+
+    if show:
+        plt.show()
+    return figures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Visualize bandit choices and rewards against reward environments.")
     parser.add_argument("--data", required=True, type=Path, help="Processed behavioral CSV from ProlificImport_updated.py")
@@ -579,17 +1097,16 @@ def main() -> None:
 
     participant_id_col = choose_participant_id_col(df, args.participant_id_col)
 
-    # Ensure numeric plotting columns.
-    for col in ["env", "trial", "choice_x", "choice_y", "score"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["env", "trial", "choice_x", "choice_y"])
-    df["env"] = df["env"].astype(int)
-    df["trial"] = df["trial"].astype(int)
-    df["choice_x"] = df["choice_x"].astype(int)
-    df["choice_y"] = df["choice_y"].astype(int)
-
     envs = load_envs(args.grid_loader, args.grid_dir, args.env_file)
-    df = add_peak_flags(df, envs, args.top_local, args.max_radius)
+    df = prepare_bandit_data(
+        df,
+        envs,
+        top_n_local=args.top_local,
+        max_radius=args.max_radius,
+        participant_id_col=participant_id_col,
+        participant_id=args.participant_id,
+        block=args.block,
+    )
 
     rt_col = find_rt_column(df)
     if rt_col is not None:
