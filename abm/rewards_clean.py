@@ -20,6 +20,8 @@ from abm.rewards_utils import (
 )
 
 
+
+
 # ====================== Mexican Hat GP (Mexican Hat on GP) ======================
 
 def create_mexican_hat_gp_set(
@@ -34,59 +36,85 @@ def create_mexican_hat_gp_set(
     local_global_max_ratio=1.2,
 ):
     """
-    Generate a set of Mexican Hat over correlated GP reward landscapes (parent + children).
-    
+    Generate correlated GP reward landscapes with a Mexican Hat added to each.
+
+    The Mexican Hat is centered at the GP minimum. Its amplitude is chosen so that
+
+        max(combined) / combined[argmax(parent)] = local_global_max_ratio
+
+    where the maximum of the combined landscape occurs at the Mexican Hat center.
+
     Parameters
     ----------
     rng : np.random.Generator
-        Random number generator
+        Random number generator.
     grid_size : int
-        Size of the grid
+        Grid size.
     n_children : int
-        Number of child landscapes
+        Number of child landscapes.
     length_scale : float
-        GP RBF kernel length scale
+        GP RBF kernel length scale.
     target_correlation : float
-        Target correlation between parent and children
-    sigma_inner : float, optional
-        Inner Gaussian width for Mexican Hat kernel
-    sigma_outer : float, optional
-        Outer Gaussian width for Mexican Hat kernel
+        Correlation between parent and child GP samples.
+    sigma_inner, sigma_outer : float, optional
+        Mexican Hat kernel widths.
     fixed_min_coords : bool
-        If True, use same minimum coordinates for all landscapes
+        If True, all landscapes share the parent's Mexican Hat center.
+        Otherwise each landscape uses its own GP minimum.
     local_global_max_ratio : float
-        Ratio of local (GP) max to global (Mexican Hat kernel) max amplitude.
-        The GP landscape is scaled so its max = 1, then the Mexican Hat kernel
-        is scaled so its max = local_global_max_ratio.
-    
+        Desired ratio
+
+            max(combined) / combined[argmax(parent)].
+
     Returns
     -------
-    parent : ndarray
-        2D array, normalized to [0, 1]
-    children : list of ndarray
-        List of child landscapes
-    min_coords : tuple
-        Coordinates of the global minimum
+    parent_mix : ndarray
+        Parent landscape.
+    children_mix : list[ndarray]
+        Child landscapes.
+    parent_min_coords : tuple
+        Mexican Hat center used for the parent.
+    parent_kernel : ndarray
+        Parent Mexican Hat component (normalized using the parent landscape).
+    parent_kernel_amplitude : float
+        Scaling applied to the normalized Mexican Hat kernel.
     """
     if rng is None:
         rng = np.random.default_rng()
-    
+
     if not (-1 <= target_correlation <= 1):
-        raise ValueError(f"target_correlation must be in [-1, 1], got {target_correlation}")
-    
-    if target_correlation == 1.0:
-        parent_mix, min_coords = create_mexican_hat_gp_single(
-            rng=rng,
-            grid_size=grid_size,
-            length_scale=length_scale,
-            sigma_inner=sigma_inner,
-            sigma_outer=sigma_outer,
-            local_global_max_ratio=local_global_max_ratio,
+        raise ValueError(
+            f"target_correlation must be in [-1, 1], got {target_correlation}"
         )
+
+    # Perfect correlation: parent == children
+    if target_correlation == 1.0:
+        parent_mix, parent_min_coords, parent_kernel, parent_kernel_amplitude = (
+            create_mexican_hat_gp_single(
+                rng=rng,
+                grid_size=grid_size,
+                length_scale=length_scale,
+                sigma_inner=sigma_inner,
+                sigma_outer=sigma_outer,
+                local_global_max_ratio=local_global_max_ratio,
+            )
+        )
+
         children_mix = [parent_mix.copy() for _ in range(n_children)]
-        return parent_mix, children_mix, min_coords
-    
-    corr_matrix = build_correlation_matrix(n_total=n_children + 1, r=target_correlation)
+
+        return (
+            parent_mix,
+            children_mix,
+            parent_min_coords,
+            parent_kernel,
+            parent_kernel_amplitude,
+        )
+
+    corr_matrix = build_correlation_matrix(
+        n_total=n_children + 1,
+        r=target_correlation,
+    )
+
     parent, children = create_gp_set(
         rng,
         grid_size=grid_size,
@@ -94,109 +122,140 @@ def create_mexican_hat_gp_set(
         length_scale=length_scale,
         corr_matrix=corr_matrix,
     )
-    
-    parent_mix, min_coords = create_mexican_hat_gp_single(
-        parent,
+
+    (
+        parent_mix,
+        parent_min_coords,
+        parent_kernel,
+        parent_kernel_amplitude,
+    ) = create_mexican_hat_gp_single(
+        parent=parent,
         length_scale=length_scale,
         sigma_inner=sigma_inner,
         sigma_outer=sigma_outer,
         local_global_max_ratio=local_global_max_ratio,
     )
-    
-    mh_center = min_coords if fixed_min_coords else None
-    
+
+    shared_center = parent_min_coords if fixed_min_coords else None
+
     children_mix = []
+
     for child in children:
-        mix, _ = create_mexican_hat_gp_single(
-            child,
+        child_mix, _, _, _ = create_mexican_hat_gp_single(
+            parent=child,
             length_scale=length_scale,
             sigma_inner=sigma_inner,
             sigma_outer=sigma_outer,
-            min_coords=mh_center,
+            min_coords=shared_center,
             local_global_max_ratio=local_global_max_ratio,
         )
-        children_mix.append(mix)
-    
-    return parent_mix, children_mix, min_coords
+        children_mix.append(child_mix)
+
+    return (
+        parent_mix,
+        children_mix,
+        parent_min_coords,
+        parent_kernel,
+        parent_kernel_amplitude,
+    )
 
 
+from abm.rewards_utils import _mexican_hat_rbf
 def create_mexican_hat_gp_single(
     parent=None,
     rng=None,
-    grid_size=25,
-    length_scale=10.0,
+    grid_size=20,
+    length_scale=3.0,
     sigma_inner=None,
     sigma_outer=None,
     min_coords=None,
     local_global_max_ratio=1.2,
 ):
     """
-    Generate a single Mexican Hat over correlated GP reward landscape.
-    
-    Parameters
-    ----------
-    parent : ndarray, optional
-        Existing GP landscape to overlay Mexican Hat kernel on
-    rng : np.random.Generator, optional
-        Random number generator (used if parent is None)
-    grid_size : int
-        Size of the grid (used if parent is None)
-    length_scale : float
-        GP RBF kernel length scale
-    sigma_inner : float, optional
-        Inner Gaussian width for Mexican Hat kernel
-    sigma_outer : float, optional
-        Outer Gaussian width for Mexican Hat kernel
-    min_coords : tuple, optional
-        Coordinates for Mexican Hat kernel center
-    local_global_max_ratio : float
-        Ratio of local (GP) max to global (Mexican Hat kernel) max amplitude.
-        The GP landscape is scaled so its max = 1, then the Mexican Hat kernel
-        is scaled so its max = local_global_max_ratio.
-    
     Returns
     -------
-    mix : ndarray
-        Combined GP + Mexican Hat landscape, normalized to [0, 1]
-    mh_kernel : ndarray
-        The Mexican Hat kernel component
+    mh_gp_grid : ndarray
+        Combined GP + Mexican Hat landscape, normalized to [0, 1].
+
     min_coords : tuple
-        Coordinates of the global minimum
+        Coordinates of the Mexican Hat center.
+
+    mh_kernel_normalized : ndarray
+        The scaled Mexican Hat component, normalized using the same
+        min/max as the combined landscape. This is the deterministic
+        prior mean used by oracle GP-UCB.
     """
     if parent is None:
         parent = _cholesky_grid(rng, grid_size, length_scale)
-    
+
     grid_size = parent.shape[0]
-    
+
     if sigma_inner is None and sigma_outer is None:
         sigma_outer = length_scale
         sigma_inner = sigma_outer / 2.0
-    
+
     if min_coords is None:
         min_coords = np.unravel_index(np.argmin(parent), parent.shape)
-    
-    # Generate Mexican Hat kernel
+
+    # Original GP maximum
+    parent_max_coords = np.unravel_index(np.argmax(parent), parent.shape)
+    parent_max = parent[parent_max_coords]
+
+    # Mexican hat kernel
     mh_kernel = _mexican_hat_rbf(
         grid_size=grid_size,
         sigma_inner=sigma_inner,
         sigma_outer=sigma_outer,
-        center=min_coords
+        center=min_coords,
     )
 
-    # Find amplitude of mh_kernel outside of the hat
-    mh_outside_amplitude = -mh_kernel.min() / (mh_kernel.max() - mh_kernel.min())
+    # Normalize kernel so that min = 0, center = 1
+    K = _min_max(mh_kernel)
 
-    # Scale GP so its max amplitude = mh_outside_amplitude
-    gp_scaled = parent * (1-mh_outside_amplitude * local_global_max_ratio)
-    # gp_max = gp_scaled.max()
-    # if gp_max > 0:
-    #     gp_scaled = gp_scaled / gp_max
-    
-    # Scale MH kernel so its max amplitude = local_global_max_ratio
-    # (since GP/local max is already scaled to 1)
-    mh_kernel = _min_max(mh_kernel) * local_global_max_ratio
-   
-    return gp_scaled + mh_kernel, min_coords
+    parent_at_center = parent[min_coords]
+    kernel_at_parent_max = K[parent_max_coords]
+
+    r = local_global_max_ratio
+
+    denom = 1.0 - r * kernel_at_parent_max
+    if denom <= 0:
+        raise ValueError(
+            "Requested local_global_max_ratio is infeasible because the "
+            "original GP maximum lies too close to the Mexican Hat center."
+        )
+
+    # Solve for amplitude A such that
+    # (parent_at_center + A)
+    # ---------------------- = r
+    # (parent_max + A*Kmax)
+    #
+    amplitude = (r * parent_max - parent_at_center) / denom
+    mh_kernel_scaled = amplitude * K
+    combined = parent + mh_kernel_scaled
+
+    # sanity check
+    combined_peak = combined[min_coords]
+    combined_at_parent_max = combined[parent_max_coords]
+
+    assert np.isclose(
+        combined_peak / combined_at_parent_max,
+        r,
+        atol=1e-10,
+    )
+
+    # Normalize everything using the combined landscape
+    mn = combined.min()
+    mx = combined.max()
+
+    def normalize(arr):
+        return (arr - mn) / (mx - mn)
+    # TODO: pass normalization into GP covariance matrix
+    return (
+        normalize(combined),
+        min_coords,
+        normalize(mh_kernel_scaled),
+        amplitude,
+    )
 
 
 # ====================== GP (Gaussian Process) ======================
@@ -572,7 +631,6 @@ def create_mexican_hat_simple_single(rng, grid_size=11, frequency=2.0, sigma_inn
         2D array, normalized to [0, 1]
     """
     return _min_max(_mexican_hat_gaussian(grid_size, frequency, sigma_inner, sigma_outer, center))
-
 
 
 # ====================== Two Valley ======================
