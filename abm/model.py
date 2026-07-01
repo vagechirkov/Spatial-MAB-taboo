@@ -134,20 +134,20 @@ class SocialGPModel(mesa.Model):
         collect_agent_reporters: bool = True,
         model_reporters_to_collect: list[str] | tuple[str, ...] | None = None,
         agent_reporters_to_collect: list[str] | tuple[str, ...] | None = None,
+        env_seed=None, 
+        run_seed=None, 
         **kwargs,
-    ):      
-        # Handle seed/rng from kwargs to support mesa.batch_run
-        # If 'seed' is passed in parameters, it ends up in kwargs.
-        seed = kwargs.pop("seed", None)
-        rng = kwargs.pop("rng", None)
-        
-        # If seed is provided, valid rng is derived from it, so we can ignore any passed rng 
-        # to avoid "both seed and rng provided" error in Model.__init__
-        if seed is not None:
-            rng = None
-            
-        super().__init__(seed=seed, rng=rng, **kwargs)
+    ):
+        kwargs.pop("rng", None)  
 
+        super().__init__(**kwargs)
+
+        self.env_seed = env_seed
+        self.run_seed = run_seed
+
+        self.rng = np.random.default_rng(run_seed)
+        self.env_rng = np.random.default_rng(env_seed)
+  
         self.num_agents = n
         self.grid_size = grid_size
         self.reward_noise_sd = reward_noise_sd
@@ -167,7 +167,7 @@ class SocialGPModel(mesa.Model):
                 corr_matrix = build_corr_matrix_bare_bones(n + 1)
             env_length_scale = float(reward_env_params.pop("length_scale", 2.0))
             parent, child_maps = make_parent_and_children_cholesky(
-                rng=self.rng,
+                rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
                 length_scale=env_length_scale,
@@ -177,7 +177,7 @@ class SocialGPModel(mesa.Model):
         elif reward_env_type == "gabor":
             # Parent + children with target correlation (scalar) and shared frequency
             parent, child_maps = make_parent_and_children_gabor(
-                rng=self.rng,
+                rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
                 **reward_env_params,
@@ -185,7 +185,7 @@ class SocialGPModel(mesa.Model):
         elif reward_env_type == "dog":
             # Currently implemented as DoG-based mexican hat
             parent, child_maps = make_parent_and_children_mexican_hat(
-                rng=self.rng,
+                rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
                 **reward_env_params,
@@ -193,7 +193,7 @@ class SocialGPModel(mesa.Model):
         elif reward_env_type == "corr_dog":
             # Correlated DoG landscapes
             parent, child_maps, self.reward_peak = make_parent_and_children_correlated_dog(
-                rng=self.rng,
+                rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
                 **reward_env_params,
@@ -205,8 +205,22 @@ class SocialGPModel(mesa.Model):
                 self.peak_radius = reward_env_params['length_scale'] // 2.0
         elif reward_env_type == "mexican_hat_gp":
             # Mexican Hat GP landscapes
-            parent, child_maps, self.reward_peak = create_mexican_hat_gp_set(
-                rng=self.rng,
+            parent, child_maps, self.reward_peak, _, self.s = create_mexican_hat_gp_set(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0
+        elif reward_env_type == "oracle_gp":
+            # Mexican Hat GP landscapes
+            parent, child_maps, self.reward_peak, self.mh_kernel, self.s = create_mexican_hat_gp_set(
+                rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
                 **reward_env_params,
@@ -218,7 +232,7 @@ class SocialGPModel(mesa.Model):
                 self.peak_radius = reward_env_params['length_scale'] // 2.0
         elif reward_env_type == "mexican_hat_2_valleys":
             parent, child_maps, self.reward_peak = make_mexican_hat_two_valleys(
-                rng=self.rng,
+                rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
                 **reward_env_params,
@@ -432,7 +446,7 @@ class SocialGPModel(mesa.Model):
         self.datacollector.collect(self)
 
 if __name__ == "__main__":
-    m = SocialGPModel(n=5, grid_size=11, alpha=0.5, seed=42)
+    m = SocialGPModel(n=5, grid_size=20, alpha=0.5, seed=42)
     for _ in range(20):
         m.step()
     

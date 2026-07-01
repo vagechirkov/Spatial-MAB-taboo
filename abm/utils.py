@@ -5,11 +5,11 @@ from matplotlib.collections import LineCollection
 from matplotlib.animation import FuncAnimation
 
 def plot_reward_grid(grid, figsize=(8, 4)):
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize)
     plt.imshow(grid, cmap='viridis', origin='lower')
     plt.colorbar()
     plt.axis('off')
-    plt.show()
+    return fig
 
 def plot_reward_grids(reward_array, titles=None):
     if titles is None:
