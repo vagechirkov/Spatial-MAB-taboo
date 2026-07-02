@@ -61,6 +61,7 @@ NOTEBOOK_VISUALIZATIONS = [
     "normalized_rewards",
     "reaction_times",
     "search_distance",
+    "block_trends",
 ]
 
 
@@ -518,7 +519,7 @@ def save_combined_maxima_indicators(
                 where="mid",
                 linewidth=0.9,
                 alpha=0.65,
-                color="tab:blue",
+                color="tab:green",
             )
             ax.step(
                 traj["trial"],
@@ -527,7 +528,7 @@ def save_combined_maxima_indicators(
                 linewidth=0.9,
                 alpha=0.65,
                 linestyle="--",
-                color="tab:orange",
+                color="tab:blue",
             )
 
         ax.set_title(f"env {env_value}", fontsize=9)
@@ -541,8 +542,8 @@ def save_combined_maxima_indicators(
 
     # A single compact legend avoids repeating text in every panel.
     legend_lines = [
-        plt.Line2D([0], [0], color="tab:blue", linewidth=1.0, label="global radius"),
-        plt.Line2D([0], [0], color="tab:orange", linewidth=1.0, linestyle="--", label="local radius"),
+        plt.Line2D([0], [0], color="tab:green", linewidth=1.0, label="global max"),
+        plt.Line2D([0], [0], color="tab:blue", linewidth=1.0, linestyle="--", label="local max"),
     ]
     fig.legend(handles=legend_lines, loc="upper right", frameon=False, fontsize=8)
     fig.supxlabel("Trial", fontsize=9)
@@ -801,6 +802,66 @@ def make_preliminary_visualizations(
     return prepared, figures
 
 
+def _sem(values: pd.Series) -> float:
+    values = values.dropna()
+    if len(values) <= 1:
+        return 0.0
+    return float(values.std(ddof=1) / (len(values) ** 0.5))
+
+
+def summarize_average_trends_generic(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    x_col: str = "trial",
+    average_within: str = "env",
+    within_series_reduce: str = "mean",
+    line_center_reduce: str = "mean",
+    overall_center_reduce: str = "mean",
+) -> Tuple[pd.DataFrame, pd.DataFrame, str]:
+    """Return unit-level and overall summaries for a measure over an x-axis column."""
+    if value_col not in df.columns:
+        raise ValueError(f"Value column not found: {value_col}")
+    if x_col not in df.columns:
+        raise ValueError(f"X-axis column not found: {x_col}")
+
+    pid_col = choose_participant_id_col(df, participant_id_col)
+    work = df[[pid_col, env_col, x_col, value_col]].copy()
+    work[env_col] = pd.to_numeric(work[env_col], errors="coerce")
+    work[x_col] = pd.to_numeric(work[x_col], errors="coerce")
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=[env_col, x_col, value_col])
+
+    if average_within == "env":
+        series_col = env_col
+        within_col = pid_col
+    elif average_within == "participant":
+        series_col = pid_col
+        within_col = env_col
+    else:
+        raise ValueError("average_within must be either 'env' or 'participant'")
+
+    reduced = (
+        work.groupby([series_col, x_col, within_col], dropna=False)[value_col]
+        .agg(within_series_reduce)
+        .reset_index(name="value")
+    )
+
+    unit_summary = (
+        reduced.groupby([series_col, x_col], dropna=False)["value"]
+        .agg(mean=line_center_reduce, sem=_sem, n="count")
+        .reset_index()
+    )
+    overall_summary = (
+        unit_summary.groupby(x_col, dropna=False)["mean"]
+        .agg(mean=overall_center_reduce, sem=_sem, n="count")
+        .reset_index()
+    )
+    return unit_summary, overall_summary, series_col
+
+
 def summarize_group_average_trends(
     df: pd.DataFrame,
     value_col: str,
@@ -810,39 +871,105 @@ def summarize_group_average_trends(
     trial_col: str = "trial",
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Return env-level and overall summaries for a trial-by-trial measure."""
-    if value_col not in df.columns:
-        raise ValueError(f"Value column not found: {value_col}")
+    unit_summary, overall_summary, _ = summarize_average_trends_generic(
+        df,
+        value_col,
+        participant_id_col=participant_id_col,
+        env_col=env_col,
+        x_col=trial_col,
+        average_within="env",
+        within_series_reduce="mean",
+    )
+    return unit_summary, overall_summary
 
-    pid_col = choose_participant_id_col(df, participant_id_col)
-    work = df[[pid_col, env_col, trial_col, value_col]].copy()
-    work[env_col] = pd.to_numeric(work[env_col], errors="coerce")
-    work[trial_col] = pd.to_numeric(work[trial_col], errors="coerce")
-    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
-    work = work.dropna(subset=[env_col, trial_col, value_col])
 
-    participant_means = (
-        work.groupby([env_col, trial_col, pid_col], dropna=False)[value_col]
-        .mean()
-        .reset_index(name="value")
+def plot_average_trends_generic(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    x_col: str = "trial",
+    average_within: str = "env",
+    within_series_reduce: str = "mean",
+    line_center_reduce: str = "mean",
+    overall_center_reduce: str = "mean",
+    x_label: Optional[str] = None,
+    y_label: Optional[str] = None,
+    left_title: Optional[str] = None,
+    legend_prefix: Optional[str] = None,
+    title: Optional[str] = None,
+    show: bool = False,
+):
+    """Plot unit-level means with shaded error bands and a pooled grand-average trend."""
+    unit_summary, overall_summary, series_col = summarize_average_trends_generic(
+        df,
+        value_col,
+        participant_id_col=participant_id_col,
+        env_col=env_col,
+        x_col=x_col,
+        average_within=average_within,
+        within_series_reduce=within_series_reduce,
+        line_center_reduce=line_center_reduce,
+        overall_center_reduce=overall_center_reduce,
     )
 
-    def sem(values: pd.Series) -> float:
-        values = values.dropna()
-        if len(values) <= 1:
-            return 0.0
-        return float(values.std(ddof=1) / (len(values) ** 0.5))
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharex=True, sharey=False)
+    axes = np.atleast_1d(axes)
 
-    env_summary = (
-        participant_means.groupby([env_col, trial_col], dropna=False)["value"]
-        .agg(mean="mean", sem=sem, n="count")
-        .reset_index()
+    if left_title is None:
+        if average_within == "env":
+            left_title = f"{line_center_reduce} across participants within each env"
+        else:
+            left_title = f"{line_center_reduce} across envs within each participant"
+    if legend_prefix is None:
+        legend_prefix = "env" if average_within == "env" else "participant"
+
+    for series_value, sub in unit_summary.groupby(series_col, sort=True):
+        axes[0].plot(
+            sub[x_col],
+            sub["mean"],
+            linewidth=1.2,
+            alpha=0.9,
+            label=f"{legend_prefix} {series_value}",
+        )
+        axes[0].fill_between(
+            sub[x_col],
+            sub["mean"] - sub["sem"],
+            sub["mean"] + sub["sem"],
+            alpha=0.18,
+        )
+
+    axes[0].set_title(left_title)
+    axes[0].set_xlabel(x_label or x_col.replace("_", " ").title())
+    axes[0].set_ylabel(y_label or value_col.replace("_", " "))
+    axes[0].grid(True, alpha=0.3)
+    if len(unit_summary[series_col].dropna().unique()) <= 6:
+        axes[0].legend(loc="best", fontsize=8)
+
+    axes[1].plot(
+        overall_summary[x_col],
+        overall_summary["mean"],
+        linewidth=1.2,
+        alpha=0.9,
+        color="tab:purple",
     )
-    overall_summary = (
-        env_summary.groupby(trial_col, dropna=False)[["mean", "sem", "n"]]
-        .agg(mean=("mean", "mean"), sem=("sem", "mean"), n=("n", "sum"))
-        .reset_index()
+    axes[1].fill_between(
+        overall_summary[x_col],
+        overall_summary["mean"] - overall_summary["sem"],
+        overall_summary["mean"] + overall_summary["sem"],
+        alpha=0.18,
+        color="tab:purple",
     )
-    return env_summary, overall_summary
+    axes[1].set_title("Grand mean")
+    axes[1].set_xlabel(x_label or x_col.replace("_", " ").title())
+    axes[1].grid(True, alpha=0.3)
+
+    fig.suptitle(title or f"{value_col} by {x_col} (group means)")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
 
 
 def plot_group_average_trends(
@@ -854,64 +981,134 @@ def plot_group_average_trends(
     trial_col: str = "trial",
     title: Optional[str] = None,
     show: bool = False,
+    within_series_reduce: str = "mean",
+    line_center_reduce: str = "mean",
+    overall_center_reduce: str = "mean",
 ):
     """Plot env-level means with shaded error bands and a pooled grand-average trend."""
-    env_summary, overall_summary = summarize_group_average_trends(
+    return plot_average_trends_generic(
         df,
         value_col,
         participant_id_col=participant_id_col,
         env_col=env_col,
-        trial_col=trial_col,
+        x_col=trial_col,
+        average_within="env",
+        within_series_reduce=within_series_reduce,
+        line_center_reduce=line_center_reduce,
+        overall_center_reduce=overall_center_reduce,
+        x_label="Trial",
+        left_title=None,
+        legend_prefix="env",
+        title=title,
+        show=show,
     )
 
-    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharex=True, sharey=False)
-    axes = np.atleast_1d(axes)
 
-    for env_value, sub in env_summary.groupby(env_col, sort=True):
-        axes[0].plot(
-            sub[trial_col],
-            sub["mean"],
-            linewidth=1.2,
-            alpha=0.9,
-            label=f"env {int(env_value)}",
+def make_block_visualizations(
+    df: pd.DataFrame,
+    *,
+    participant_id_col: Optional[str] = None,
+    rt_col: Optional[str] = None,
+    average_within: str = "env",
+    title_prefix: str = "Block-average",
+    show: bool = False,
+):
+    """Create block-level plots for common bandit metrics."""
+    figures = {}
+    if average_within == "env":
+        left_title = "Mean across participants within each env"
+        legend_prefix = "env"
+    elif average_within == "participant":
+        left_title = "Mean across envs within each participant"
+        legend_prefix = "participant"
+    else:
+        raise ValueError("average_within must be either 'env' or 'participant'")
+
+    reward_col = "normalized_score" if "normalized_score" in df.columns else "score" if "score" in df.columns else None
+    if reward_col is not None:
+        figures["mean_reward_by_block"] = plot_average_trends_generic(
+            df,
+            reward_col,
+            participant_id_col=participant_id_col,
+            x_col="block",
+            average_within=average_within,
+            within_series_reduce="mean",
+            x_label="Block",
+            y_label="Mean reward",
+            left_title=left_title,
+            legend_prefix=legend_prefix,
+            title=f"{title_prefix}: mean reward by block",
+            show=False,
         )
-        axes[0].fill_between(
-            sub[trial_col],
-            sub["mean"] - sub["sem"],
-            sub["mean"] + sub["sem"],
-            alpha=0.18,
+
+    rt_col = rt_col or find_rt_column(df)
+    if rt_col is not None and rt_col in df.columns:
+        figures["median_rt_by_block"] = plot_average_trends_generic(
+            df,
+            rt_col,
+            participant_id_col=participant_id_col,
+            x_col="block",
+            average_within=average_within,
+            within_series_reduce="median",
+            x_label="Block",
+            y_label="Median RT",
+            left_title=left_title,
+            legend_prefix=legend_prefix,
+            title=f"{title_prefix}: median RT by block",
+            show=False,
         )
 
-    axes[0].set_title("Mean across participants within each env")
-    axes[0].set_xlabel("Trial")
-    axes[0].set_ylabel(value_col.replace("_", " "))
-    axes[0].grid(True, alpha=0.3)
-    if len(env_summary[env_col].dropna().unique()) <= 6:
-        axes[0].legend(loc="best", fontsize=8)
+    if "search_distance" in df.columns:
+        figures["median_search_distance_by_block"] = plot_average_trends_generic(
+            df,
+            "search_distance",
+            participant_id_col=participant_id_col,
+            x_col="block",
+            average_within=average_within,
+            within_series_reduce="median",
+            x_label="Block",
+            y_label="Median search distance",
+            left_title=left_title,
+            legend_prefix=legend_prefix,
+            title=f"{title_prefix}: search distance by block",
+            show=False,
+        )
 
-    axes[1].plot(
-        overall_summary[trial_col],
-        overall_summary["mean"],
-        linewidth=1.2,
-        alpha=0.9,
-        color="tab:purple",
-    )
-    axes[1].fill_between(
-        overall_summary[trial_col],
-        overall_summary["mean"] - overall_summary["sem"],
-        overall_summary["mean"] + overall_summary["sem"],
-        alpha=0.18,
-        color="tab:purple",
-    )
-    axes[1].set_title("Grand mean across envs")
-    axes[1].set_xlabel("Trial")
-    axes[1].grid(True, alpha=0.3)
+    if "hit_global_max" in df.columns:
+        figures["global_max_rate_by_block"] = plot_average_trends_generic(
+            df,
+            "hit_global_max",
+            participant_id_col=participant_id_col,
+            x_col="block",
+            average_within=average_within,
+            within_series_reduce="mean",
+            x_label="Block",
+            y_label="Global-max indicator",
+            left_title=left_title,
+            legend_prefix=legend_prefix,
+            title=f"{title_prefix}: global-max indicator by block",
+            show=False,
+        )
 
-    fig.suptitle(title or f"{value_col} by trial (group means)")
-    fig.tight_layout()
+    if "hit_top_local_max" in df.columns:
+        figures["local_max_rate_by_block"] = plot_average_trends_generic(
+            df,
+            "hit_top_local_max",
+            participant_id_col=participant_id_col,
+            x_col="block",
+            average_within=average_within,
+            within_series_reduce="mean",
+            x_label="Block",
+            y_label="Local-max indicator",
+            left_title=left_title,
+            legend_prefix=legend_prefix,
+            title=f"{title_prefix}: local-max indicator by block",
+            show=False,
+        )
+
     if show:
         plt.show()
-    return fig, axes
+    return figures
 
 
 def summarize_participant_average_trends(
@@ -951,8 +1148,8 @@ def summarize_participant_average_trends(
         .reset_index()
     )
     overall_summary = (
-        participant_summary.groupby(trial_col, dropna=False)[["mean", "sem", "n"]]
-        .agg(mean=("mean", "mean"), sem=("sem", "mean"), n=("n", "sum"))
+        participant_summary.groupby(trial_col, dropna=False)["mean"]
+        .agg(mean="mean", sem=sem, n="count")
         .reset_index()
     )
     return participant_summary, overall_summary
@@ -967,64 +1164,27 @@ def plot_participant_average_trends(
     trial_col: str = "trial",
     title: Optional[str] = None,
     show: bool = False,
+    within_series_reduce: str = "mean",
+    line_center_reduce: str = "mean",
+    overall_center_reduce: str = "mean",
 ):
     """Plot participant-level means across environments with shaded error bands and a grand mean."""
-    participant_summary, overall_summary = summarize_participant_average_trends(
+    return plot_average_trends_generic(
         df,
         value_col,
         participant_id_col=participant_id_col,
         env_col=env_col,
-        trial_col=trial_col,
+        x_col=trial_col,
+        average_within="participant",
+        within_series_reduce=within_series_reduce,
+        line_center_reduce=line_center_reduce,
+        overall_center_reduce=overall_center_reduce,
+        x_label="Trial",
+        left_title=None,
+        legend_prefix="participant",
+        title=title or f"{value_col} by trial (participant means)",
+        show=show,
     )
-
-    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharex=True, sharey=False)
-    axes = np.atleast_1d(axes)
-
-    for pid_value, sub in participant_summary.groupby(participant_id_col or choose_participant_id_col(df), sort=True):
-        axes[0].plot(
-            sub[trial_col],
-            sub["mean"],
-            linewidth=1.1,
-            alpha=0.85,
-            label=str(pid_value),
-        )
-        axes[0].fill_between(
-            sub[trial_col],
-            sub["mean"] - sub["sem"],
-            sub["mean"] + sub["sem"],
-            alpha=0.12,
-        )
-
-    axes[0].set_title("Mean across envs within each participant")
-    axes[0].set_xlabel("Trial")
-    axes[0].set_ylabel(value_col.replace("_", " "))
-    axes[0].grid(True, alpha=0.3)
-    if participant_summary.shape[0] <= 20:
-        axes[0].legend(loc="best", fontsize=8)
-
-    axes[1].plot(
-        overall_summary[trial_col],
-        overall_summary["mean"],
-        linewidth=1.2,
-        alpha=0.9,
-        color="tab:green",
-    )
-    axes[1].fill_between(
-        overall_summary[trial_col],
-        overall_summary["mean"] - overall_summary["sem"],
-        overall_summary["mean"] + overall_summary["sem"],
-        alpha=0.18,
-        color="tab:green",
-    )
-    axes[1].set_title("Grand mean across participants")
-    axes[1].set_xlabel("Trial")
-    axes[1].grid(True, alpha=0.3)
-
-    fig.suptitle(title or f"{value_col} by trial (participant means)")
-    fig.tight_layout()
-    if show:
-        plt.show()
-    return fig, axes
 
 
 def make_group_average_visualizations(
@@ -1051,12 +1211,15 @@ def make_group_average_visualizations(
             value_cols.append(col)
 
     for value_col in value_cols:
+        line_center_reduce = "median" if value_col == rt_col else "mean"
         figures[value_col] = plot_group_average_trends(
             df,
             value_col,
             participant_id_col=participant_id_col,
             title=f"{title_prefix}: {value_col}",
             show=False,
+            line_center_reduce=line_center_reduce,
+            overall_center_reduce="mean",
         )
 
     if show:
