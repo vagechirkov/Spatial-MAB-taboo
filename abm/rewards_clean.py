@@ -26,9 +26,9 @@ from abm.rewards_utils import (
 
 def create_mexican_hat_gp_set(
     rng,
-    grid_size=33,
+    grid_size=20,
     n_children=1,
-    length_scale=4.5,
+    length_scale=3,
     target_correlation=1.0,
     sigma_inner=None,
     sigma_outer=None,
