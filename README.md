@@ -52,6 +52,7 @@ uv run python3 abm/model.py
 - `beta`
 - `tau`
 - `alpha`
+- `sigma_social`
 
 Each can be passed as:
 
@@ -66,11 +67,17 @@ from abm.model import SocialGPModel
 
 model = SocialGPModel(
     n=2,
-    beta=[0.07, 0.10],
-    tau=[0.09, 0.07],
-    alpha=[0.12, 0.18],
+    social_information_mode="social_generalization",
+    beta=0.33,
+    tau=0.03,
+    sigma_social=12.55,
 )
 ```
+
+`social_information_mode` is model-wide and accepts `"value_shaping"` (the
+backward-compatible default) or `"social_generalization"`. In Social
+Generalization, `sigma_social` is added directly to the GP observation-noise
+variance for social rows; it is not squared.
 
 ### mesa.batch_run Note
 
@@ -83,9 +90,11 @@ from abm.model import SocialGPModel, as_batch_fixed
 
 params = {
     "n": 2,
+    "social_information_mode": "social_generalization",
     "beta": as_batch_fixed([0.07, 0.10]),
     "tau": as_batch_fixed([0.09, 0.07]),
     "alpha": as_batch_fixed([0.12, 0.18]),
+    "sigma_social": as_batch_fixed([12.55, 12.55]),
 }
 
 results = mesa.batch_run(
@@ -107,7 +116,7 @@ Run the notebook-style parameter sweep from the command line:
 All sweep settings are grouped at the top of `run_parameter_sweep.sh`:
 
 - environment and runtime (`PYTHON_BIN`, `NUMBER_PROCESSES`)
-- model constants (`GRID_SIZE`, `LAMBDA_TRUE`, `TARGET_CORRELATION`, `N_RUNS`, `MAX_STEPS`)
+- model constants (`GRID_SIZE`, `LAMBDA_TRUE`, `TARGET_CORRELATION`, `N_RUNS`, `MAX_STEPS`, `SOCIAL_INFORMATION_MODE`, `SIGMA_SOCIAL`)
 - sweep ranges (`BETA_*`, `TAU_*`, `LENGTH_SCALE_MULTIPLIERS`)
 - output and sharding (`NUM_JOBS`, `JOB_INDEX`, `OUTPUT_STEM`)
 
@@ -173,6 +182,20 @@ Override the single-point values via environment variables:
 ```bash
 BETA=0.53 TAU=0.02 LENGTH_SCALE_MULTIPLIER=0.1 ./run_single_job.sh
 ```
+
+Run the Witt Social Generalization configuration with:
+
+```bash
+SOCIAL_INFORMATION_MODE=social_generalization \
+SIGMA_SOCIAL=12.55 \
+BETA=0.33 \
+TAU=0.03 \
+LENGTH_SCALE_MULTIPLIER=0.555 \
+./run_single_job.sh
+```
+
+Use `SIGMA_SOCIAL_BY_AGENT="12.55,12.55"` for heterogeneous fixed values;
+the Python runner also exposes `--sigma-social-by-agent`.
 
 ## Scaling To Many Combinations / Nodes
 

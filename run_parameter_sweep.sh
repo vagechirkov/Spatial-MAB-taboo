@@ -87,6 +87,9 @@ N_AGENTS="${N_AGENTS:-1}"
 N_RUNS="${N_RUNS:-100}"
 MAX_STEPS="${MAX_STEPS:-300}"
 ALPHA="${ALPHA:-0.0}"
+SOCIAL_INFORMATION_MODE="${SOCIAL_INFORMATION_MODE:-value_shaping}"
+SIGMA_SOCIAL="${SIGMA_SOCIAL:-0.0}"
+SIGMA_SOCIAL_BY_AGENT="${SIGMA_SOCIAL_BY_AGENT:-}"
 
 BETA_START="${BETA_START:-0.3}"
 BETA_STOP="${BETA_STOP:-0.7}"
@@ -163,6 +166,8 @@ cmd=(
   --n-runs "${N_RUNS}"
   --max-steps "${MAX_STEPS}"
   --alpha "${ALPHA}"
+  --social-information-mode "${SOCIAL_INFORMATION_MODE}"
+  --sigma-social "${SIGMA_SOCIAL}"
   --beta-start "${BETA_START}"
   --beta-stop "${BETA_STOP}"
   --beta-step "${BETA_STEP}"
@@ -177,6 +182,10 @@ cmd=(
   --job-index "${JOB_INDEX}"
   --log-every "${LOG_EVERY}"
 )
+
+if [[ -n "${SIGMA_SOCIAL_BY_AGENT}" ]]; then
+  cmd+=(--sigma-social-by-agent "${SIGMA_SOCIAL_BY_AGENT}")
+fi
 
 if [[ -n "${LENGTH_SCALE_VALUES}" ]]; then
   cmd+=(--length-scale-values "${LENGTH_SCALE_VALUES}")
@@ -217,6 +226,10 @@ echo "OUTPUT_STEM: ${OUTPUT_STEM}"
 echo "SLURM_JOB_ID: ${SLURM_JOB_ID:-none}"
 echo "SLURM_ARRAY_TASK_ID: ${SLURM_ARRAY_TASK_ID:-none}"
 echo "NUM_JOBS=${NUM_JOBS}, JOB_INDEX=${JOB_INDEX}"
+echo "SOCIAL_INFORMATION_MODE=${SOCIAL_INFORMATION_MODE}, SIGMA_SOCIAL=${SIGMA_SOCIAL}"
+if [[ -n "${SIGMA_SOCIAL_BY_AGENT}" ]]; then
+  echo "SIGMA_SOCIAL_BY_AGENT=${SIGMA_SOCIAL_BY_AGENT}"
+fi
 if [[ -n "${LENGTH_SCALE_VALUES}" ]]; then
   echo "Length-scale sweep mode: absolute values (${LENGTH_SCALE_VALUES})"
 elif [[ -n "${LENGTH_SCALE_LOG_START}" || -n "${LENGTH_SCALE_LOG_STOP}" || -n "${LENGTH_SCALE_LOG_NUM}" ]]; then

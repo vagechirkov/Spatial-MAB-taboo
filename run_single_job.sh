@@ -77,6 +77,9 @@ N_RUNS="${N_RUNS:-100}"
 MAX_STEPS="${MAX_STEPS:-500}"
 ALPHA="${ALPHA:-0.12}"
 ALPHA_BY_AGENT="${ALPHA_BY_AGENT:-}"
+SOCIAL_INFORMATION_MODE="${SOCIAL_INFORMATION_MODE:-value_shaping}"
+SIGMA_SOCIAL="${SIGMA_SOCIAL:-0.0}"
+SIGMA_SOCIAL_BY_AGENT="${SIGMA_SOCIAL_BY_AGENT:-}"
 
 BETA="${BETA:-0.53}"
 BETA_STEP="${BETA_STEP:-1.0}"
@@ -116,6 +119,8 @@ cmd=(
   --n-runs "${N_RUNS}"
   --max-steps "${MAX_STEPS}"
   --alpha "${ALPHA}"
+  --social-information-mode "${SOCIAL_INFORMATION_MODE}"
+  --sigma-social "${SIGMA_SOCIAL}"
   --beta-start "${BETA}"
   --beta-stop "${BETA}"
   --beta-step "${BETA_STEP}"
@@ -137,6 +142,10 @@ fi
 
 if [[ -n "${ALPHA_BY_AGENT}" ]]; then
   cmd+=(--alpha-by-agent "${ALPHA_BY_AGENT}")
+fi
+
+if [[ -n "${SIGMA_SOCIAL_BY_AGENT}" ]]; then
+  cmd+=(--sigma-social-by-agent "${SIGMA_SOCIAL_BY_AGENT}")
 fi
 
 if [[ -n "${BETA_BY_AGENT}" ]]; then
@@ -167,6 +176,7 @@ echo "RUNNER_MODULE=${RUNNER_MODULE}"
 echo "JOB_NAME=${JOB_NAME}"
 echo "OUTPUT_STEM=${OUTPUT_STEM}"
 echo "BETA=${BETA}, TAU=${TAU}, LENGTH_SCALE_MULTIPLIER=${LENGTH_SCALE_MULTIPLIER}"
+echo "SOCIAL_INFORMATION_MODE=${SOCIAL_INFORMATION_MODE}, SIGMA_SOCIAL=${SIGMA_SOCIAL}"
 if [[ -n "${BETA_BY_AGENT}" ]]; then
   echo "BETA_BY_AGENT=${BETA_BY_AGENT}"
 fi
@@ -175,6 +185,9 @@ if [[ -n "${TAU_BY_AGENT}" ]]; then
 fi
 if [[ -n "${ALPHA_BY_AGENT}" ]]; then
   echo "ALPHA_BY_AGENT=${ALPHA_BY_AGENT}"
+fi
+if [[ -n "${SIGMA_SOCIAL_BY_AGENT}" ]]; then
+  echo "SIGMA_SOCIAL_BY_AGENT=${SIGMA_SOCIAL_BY_AGENT}"
 fi
 if [[ -n "${LENGTH_SCALE_MULTIPLIERS_BY_AGENT}" ]]; then
   echo "LENGTH_SCALE_MULTIPLIERS_BY_AGENT=${LENGTH_SCALE_MULTIPLIERS_BY_AGENT}"

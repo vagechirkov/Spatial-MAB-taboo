@@ -23,6 +23,8 @@ from .reporter_helpers import (
     normalize_reporter_selection,
 )
 
+SOCIAL_INFORMATION_MODES = {"value_shaping", "social_generalization"}
+
 def _build_network(network_type, n):
     if network_type == "fully_connected":
         return nx.complete_graph(n)
@@ -106,11 +108,11 @@ def _normalize_agent_parameter(value, n: int, parameter_name: str) -> list[float
 
 class SocialGPModel(mesa.Model):
     """
-    Bare-bones GP-Value Shaping model on correlated landscapes.
+    GP-UCB model with model-wide social-information learning on correlated landscapes.
 
-    Agent parameters (`length_scale`, `observation_noise`, `beta`, `tau`, `alpha`)
-    can be provided as scalars (shared), length-1 sequences (broadcast), or
-    length-n sequences (heterogeneous values per agent).
+    Agent parameters (`length_scale`, `observation_noise`, `beta`, `tau`, `alpha`,
+    `sigma_social`) can be provided as scalars (shared), length-1 sequences
+    (broadcast), or length-n sequences (heterogeneous values per agent).
 
     For mesa.batch_run, wrap heterogeneous vectors with `as_batch_fixed(...)`
     so they are passed as fixed values instead of sweep dimensions.
@@ -125,6 +127,8 @@ class SocialGPModel(mesa.Model):
         beta: float | Sequence[float] | np.ndarray = 0.5,
         tau: float | Sequence[float] | np.ndarray = 0.01,
         alpha: float | Sequence[float] | np.ndarray = 0.6,
+        social_information_mode: str = "value_shaping",
+        sigma_social: float | Sequence[float] | np.ndarray = 0.0,
         network_type: str = "fully_connected",
         reward_noise_sd : float = 0.001,
         reward_env_type: str = "gp",
@@ -151,6 +155,12 @@ class SocialGPModel(mesa.Model):
         self.num_agents = n
         self.grid_size = grid_size
         self.reward_noise_sd = reward_noise_sd
+        if social_information_mode not in SOCIAL_INFORMATION_MODES:
+            raise ValueError(
+                "social_information_mode must be one of "
+                f"{sorted(SOCIAL_INFORMATION_MODES)}. Got: {social_information_mode!r}"
+            )
+        self.social_information_mode = social_information_mode
         if summary_window <= 0:
             raise ValueError("summary_window must be a positive integer")
         self.summary_window = int(summary_window)
@@ -273,6 +283,14 @@ class SocialGPModel(mesa.Model):
         beta_by_agent = _normalize_agent_parameter(beta, n, "beta")
         tau_by_agent = _normalize_agent_parameter(tau, n, "tau")
         alpha_by_agent = _normalize_agent_parameter(alpha, n, "alpha")
+        sigma_social_by_agent = _normalize_agent_parameter(
+            sigma_social, n, "sigma_social"
+        )
+        if any(
+            not np.isfinite(value) or value < 0
+            for value in sigma_social_by_agent
+        ):
+            raise ValueError("sigma_social values must be finite and nonnegative")
 
         self.agent_hyperparameters = {
             "length_scale": length_scale_by_agent,
@@ -280,6 +298,7 @@ class SocialGPModel(mesa.Model):
             "beta": beta_by_agent,
             "tau": tau_by_agent,
             "alpha": alpha_by_agent,
+            "sigma_social": sigma_social_by_agent,
         }
 
         SocialGPAgent.create_agents(
@@ -295,6 +314,8 @@ class SocialGPModel(mesa.Model):
             beta_social=beta_by_agent,
             tau=tau_by_agent,
             alpha=alpha_by_agent,
+            sigma_social=sigma_social_by_agent,
+            social_information_mode=[social_information_mode] * n,
         )
 
         # Reporter radii are in grid-distance units.

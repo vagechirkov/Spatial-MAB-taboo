@@ -156,8 +156,68 @@ def value_shaping(
     # return np.exp(logits)
 
 
+def social_generalization(
+    X_obs_private: np.ndarray,
+    y_obs_private: np.ndarray,
+    X_obs_social: list[np.ndarray],
+    y_obs_social: list[np.ndarray],
+    X_predict: np.ndarray,
+    length_scale: float,
+    observation_noise: float,
+    sigma_social: float,
+    beta: float,
+    random_state,
+) -> np.ndarray:
+    """Pool private and social observations in one GP-UCB model.
+
+    ``sigma_social`` is an additive observation-noise variance. Private rows
+    receive ``observation_noise`` and social rows receive
+    ``observation_noise + sigma_social``.
+    """
+    social_pairs = [
+        (np.asarray(xs), np.asarray(ys).reshape(-1))
+        for xs, ys in zip(X_obs_social, y_obs_social)
+        if len(xs) > 0
+    ]
+
+    X_private = np.asarray(X_obs_private)
+    y_private = np.asarray(y_obs_private).reshape(-1)
+
+    if social_pairs:
+        X_social = np.concatenate([xs for xs, _ in social_pairs], axis=0)
+        y_social = np.concatenate([ys for _, ys in social_pairs], axis=0)
+        X_observed = np.concatenate((X_private, X_social), axis=0)
+        y_observed = np.concatenate((y_private, y_social), axis=0)
+        observation_noise_by_row = np.concatenate(
+            (
+                np.full(len(X_private), observation_noise, dtype=float),
+                np.full(
+                    len(X_social),
+                    observation_noise + sigma_social,
+                    dtype=float,
+                ),
+            )
+        )
+    else:
+        X_observed = X_private
+        y_observed = y_private
+        observation_noise_by_row = np.full(
+            len(X_private), observation_noise, dtype=float
+        )
+
+    gp_mean, gp_std = gp_base_generalization(
+        X_observed,
+        y_observed,
+        X_predict,
+        RBF(length_scale=length_scale),
+        observation_noise_by_row,
+        random_state,
+    )
+    return gp_mean + beta * gp_std
+
+
 class SocialGPAgent(CellAgent):
-    """GP-based explorer living on a Network grid using Value-Shaping."""
+    """GP-based explorer using a model-selected social-information mechanism."""
 
     def __init__(
         self,
@@ -172,6 +232,8 @@ class SocialGPAgent(CellAgent):
         beta_social: float,
         tau: float,
         alpha: float,
+        sigma_social: float = 0.0,
+        social_information_mode: str = "value_shaping",
     ):
         super().__init__(model)
         self.cell = cell
@@ -186,6 +248,8 @@ class SocialGPAgent(CellAgent):
         self.beta_social = beta_social
         self.tau = tau
         self.alpha = alpha
+        self.sigma_social = sigma_social
+        self.social_information_mode = social_information_mode
 
         # Memory buffers
         self.X_observations: list[tuple[int, int]] = []
@@ -251,22 +315,36 @@ class SocialGPAgent(CellAgent):
         y_priv = np.array(self.y_observations).reshape(-1, 1)
         X_soc, y_soc = self._gather_social_info()
 
-        self.ucb = value_shaping(
-            X_priv,
-            y_priv,
-            X_soc,
-            y_soc,
-            self.meshgrid_flatten,
-            length_scale_private=self.length_scale_private,
-            length_scale_social=self.length_scale_social,
-            observation_noise_private=self.observation_noise_private,
-            observation_noise_social=self.observation_noise_social,
-            beta_private=self.beta_private,
-            beta_social=self.beta_social,
-            alpha=self.alpha,
-            tau=self.tau,
-            random_state=self.model.rng.__getstate__(),
-        )
+        if self.social_information_mode == "social_generalization":
+            self.ucb = social_generalization(
+                X_priv,
+                y_priv,
+                X_soc,
+                y_soc,
+                self.meshgrid_flatten,
+                length_scale=self.length_scale_private,
+                observation_noise=self.observation_noise_private,
+                sigma_social=self.sigma_social,
+                beta=self.beta_private,
+                random_state=self.model.rng.__getstate__(),
+            )
+        else:
+            self.ucb = value_shaping(
+                X_priv,
+                y_priv,
+                X_soc,
+                y_soc,
+                self.meshgrid_flatten,
+                length_scale_private=self.length_scale_private,
+                length_scale_social=self.length_scale_social,
+                observation_noise_private=self.observation_noise_private,
+                observation_noise_social=self.observation_noise_social,
+                beta_private=self.beta_private,
+                beta_social=self.beta_social,
+                alpha=self.alpha,
+                tau=self.tau,
+                random_state=self.model.rng.__getstate__(),
+            )
 
         # Edited 2026.02.25
         logits = self.ucb / self.tau

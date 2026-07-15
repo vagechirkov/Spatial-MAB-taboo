@@ -98,6 +98,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-steps", type=int, default=300)
     parser.add_argument("--alpha", type=float, default=0.0)
     parser.add_argument(
+        "--social-information-mode",
+        choices=("value_shaping", "social_generalization"),
+        default="value_shaping",
+    )
+    parser.add_argument(
+        "--sigma-social",
+        type=float,
+        default=0.0,
+        help="Additive GP observation-noise variance for social observations.",
+    )
+    parser.add_argument(
+        "--sigma-social-by-agent",
+        type=str,
+        default=None,
+        help=(
+            "Optional comma-separated per-agent social noise values. "
+            "Length must be 1 or n-agents. When set, overrides --sigma-social "
+            "and is passed as one fixed mesa.batch_run value."
+        ),
+    )
+    parser.add_argument(
         "--alpha-by-agent",
         type=str,
         default=None,
@@ -242,6 +263,11 @@ def main() -> None:
         args.n_agents,
         "alpha-by-agent",
     )
+    sigma_social_by_agent = normalize_agent_vector(
+        parse_optional_csv_floats(args.sigma_social_by_agent),
+        args.n_agents,
+        "sigma-social-by-agent",
+    )
     length_scale_multipliers_by_agent = normalize_agent_vector(
         parse_optional_csv_floats(args.length_scale_multipliers_by_agent),
         args.n_agents,
@@ -295,6 +321,11 @@ def main() -> None:
     else:
         alpha_value = as_batch_fixed(alpha_by_agent)
 
+    if sigma_social_by_agent is None:
+        sigma_social_value = args.sigma_social
+    else:
+        sigma_social_value = as_batch_fixed(sigma_social_by_agent)
+
     output_path = Path(args.output_csv)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -333,6 +364,8 @@ def main() -> None:
             "length_scale": length_scale_value,
             "tau": tau_value,
             "alpha": alpha_value,
+            "social_information_mode": args.social_information_mode,
+            "sigma_social": sigma_social_value,
             "reward_env_type": "mexican_hat_gp",
             "reward_env_params": [reward_params],
             "collect_agent_reporters": True,
