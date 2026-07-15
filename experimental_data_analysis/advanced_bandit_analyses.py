@@ -119,19 +119,19 @@ def _summarize_previous_reward_conditioned_trends(
     work["within_unit"] = work[env_col].astype(int).astype(str) + "_b" + work[block_col].astype(int).astype(str)
 
     reduced = (
-        work.groupby([pid_col, bin_col, bin_index_col, "within_unit"], dropna=False, observed=False)[value_col]
+        work.groupby([pid_col, bin_col, bin_index_col, "within_unit"], dropna=False, observed=True)[value_col]
         .agg(_coerce_reduce_name(within_series_reduce))
         .reset_index(name="value")
     )
 
     unit_summary = (
-        reduced.groupby([pid_col, bin_col, bin_index_col], dropna=False, observed=False)["value"]
+        reduced.groupby([pid_col, bin_col, bin_index_col], dropna=False, observed=True)["value"]
         .agg(mean=_coerce_reduce_name(line_center_reduce), sem=_sem, n="count")
         .reset_index()
         .sort_values([pid_col, bin_index_col], kind="mergesort")
     )
     overall_summary = (
-        unit_summary.groupby([bin_col, bin_index_col], dropna=False, observed=False)["mean"]
+        unit_summary.groupby([bin_col, bin_index_col], dropna=False, observed=True)["mean"]
         .agg(mean=_coerce_reduce_name(overall_center_reduce), sem=_sem, n="count")
         .reset_index()
         .sort_values(bin_index_col, kind="mergesort")
@@ -176,16 +176,36 @@ def plot_previous_reward_conditioned_trends(
     for _, sub in unit_summary.groupby(pid_col, sort=True):
         sub = sub.sort_values("prev_reward_bin_index")
         x = sub["prev_reward_bin_index"].to_numpy(dtype=float)
-        axes[0].plot(x, sub["mean"], linewidth=1.0, alpha=0.8, color="tab:blue")
-        axes[0].fill_between(x, sub["mean"] - sub["sem"], sub["mean"] + sub["sem"], alpha=0.12, color="tab:blue")
+        y = sub["mean"].to_numpy(dtype=float)
+        sem = sub["sem"].to_numpy(dtype=float)
+        axes[0].plot(
+            x,
+            y,
+            linewidth=1.4,
+            alpha=0.35,
+            color="tab:blue",
+            marker="o",
+            markersize=3.5,
+        )
+        axes[0].fill_between(x, y - sem, y + sem, alpha=0.08, color="tab:blue")
 
     overall_summary = overall_summary.sort_values("prev_reward_bin_index")
     x = overall_summary["prev_reward_bin_index"].to_numpy(dtype=float)
-    axes[1].plot(x, overall_summary["mean"], linewidth=1.5, alpha=0.95, color="tab:purple")
+    y = overall_summary["mean"].to_numpy(dtype=float)
+    sem = overall_summary["sem"].to_numpy(dtype=float)
+    axes[1].plot(
+        x,
+        y,
+        linewidth=2.2,
+        alpha=0.95,
+        color="tab:purple",
+        marker="o",
+        markersize=5,
+    )
     axes[1].fill_between(
         x,
-        overall_summary["mean"] - overall_summary["sem"],
-        overall_summary["mean"] + overall_summary["sem"],
+        y - sem,
+        y + sem,
         alpha=0.18,
         color="tab:purple",
     )
@@ -195,11 +215,136 @@ def plot_previous_reward_conditioned_trends(
         ax.set_xticklabels(labels, rotation=0)
         ax.grid(True, alpha=0.3)
         ax.set_xlabel("Previous normalized reward")
+        ax.set_xlim(-0.25, len(labels) - 0.75)
 
     axes[0].set_title("Participant means across envs and blocks")
     axes[0].set_ylabel(y_label or value_col.replace("_", " "))
     axes[1].set_title("Grand mean across participants")
     fig.suptitle(title or f"{value_col} by previous reward")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def _summarize_previous_reward_conditioned_by_group(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    block_col: str = "block",
+    group_col: str = "performance_group",
+    bin_col: str = "prev_reward_bin",
+    bin_index_col: str = "prev_reward_bin_index",
+    within_series_reduce: str = "mean",
+    line_center_reduce: str = "mean",
+    overall_center_reduce: str = "mean",
+) -> Tuple[pd.DataFrame, pd.DataFrame, Sequence[str]]:
+    if value_col not in df.columns:
+        raise ValueError(f"Value column not found: {value_col}")
+    if group_col not in df.columns:
+        raise ValueError("Performance groups are missing. Run assign_performance_groups(...) first.")
+    if bin_col not in df.columns or bin_index_col not in df.columns:
+        raise ValueError("Previous reward columns are missing. Run add_previous_reward_columns(...) first.")
+
+    pid_col = _viz.choose_participant_id_col(df, participant_id_col)
+    work = df[[pid_col, env_col, block_col, value_col, group_col, bin_col, bin_index_col]].copy()
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work[env_col] = pd.to_numeric(work[env_col], errors="coerce")
+    work[block_col] = pd.to_numeric(work[block_col], errors="coerce")
+    work = work.dropna(subset=[pid_col, env_col, block_col, value_col, group_col, bin_col, bin_index_col])
+    work["within_unit"] = work[env_col].astype(int).astype(str) + "_b" + work[block_col].astype(int).astype(str)
+
+    reduced = (
+        work.groupby([pid_col, group_col, bin_col, bin_index_col, "within_unit"], dropna=False, observed=True)[value_col]
+        .agg(_coerce_reduce_name(within_series_reduce))
+        .reset_index(name="value")
+    )
+
+    participant_summary = (
+        reduced.groupby([pid_col, group_col, bin_col, bin_index_col], dropna=False, observed=True)["value"]
+        .agg(mean=_coerce_reduce_name(line_center_reduce), sem=_sem, n="count")
+        .reset_index()
+        .sort_values([group_col, pid_col, bin_index_col], kind="mergesort")
+    )
+    overall_summary = (
+        participant_summary.groupby([group_col, bin_col, bin_index_col], dropna=False, observed=True)["mean"]
+        .agg(mean=_coerce_reduce_name(overall_center_reduce), sem=_sem, n="count")
+        .reset_index()
+        .sort_values([group_col, bin_index_col], kind="mergesort")
+    )
+    labels = [
+        str(label)
+        for label in participant_summary.sort_values(bin_index_col, kind="mergesort")[bin_col].dropna().drop_duplicates().tolist()
+    ]
+    return participant_summary, overall_summary, labels
+
+
+def plot_previous_reward_conditioned_by_performance(
+    df: pd.DataFrame,
+    value_col: str,
+    *,
+    participant_id_col: Optional[str] = None,
+    env_col: str = "env",
+    block_col: str = "block",
+    group_col: str = "performance_group",
+    within_series_reduce: str = "mean",
+    line_center_reduce: str = "mean",
+    overall_center_reduce: str = "mean",
+    title: Optional[str] = None,
+    y_label: Optional[str] = None,
+    show: bool = False,
+):
+    """Plot previous-reward-conditioned trends separated by performance group."""
+    participant_summary, overall_summary, labels = _summarize_previous_reward_conditioned_by_group(
+        df,
+        value_col,
+        participant_id_col=participant_id_col,
+        env_col=env_col,
+        block_col=block_col,
+        group_col=group_col,
+        within_series_reduce=within_series_reduce,
+        line_center_reduce=line_center_reduce,
+        overall_center_reduce=overall_center_reduce,
+    )
+
+    pid_col = _viz.choose_participant_id_col(df, participant_id_col)
+    colors = _performance_group_colors()
+    positions = np.arange(len(labels))
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharey=False)
+
+    for group_name in _performance_group_order():
+        group_participants = participant_summary[participant_summary[group_col] == group_name]
+        color = colors[group_name]
+        for _, sub in group_participants.groupby(pid_col, sort=True):
+            sub = sub.sort_values("prev_reward_bin_index")
+            x = sub["prev_reward_bin_index"].to_numpy(dtype=float)
+            y = sub["mean"].to_numpy(dtype=float)
+            sem = sub["sem"].to_numpy(dtype=float)
+            axes[0].plot(x, y, linewidth=1.3, alpha=0.28, color=color, marker="o", markersize=3.0)
+            axes[0].fill_between(x, y - sem, y + sem, alpha=0.06, color=color)
+
+        group_overall = overall_summary[overall_summary[group_col] == group_name].sort_values("prev_reward_bin_index")
+        x = group_overall["prev_reward_bin_index"].to_numpy(dtype=float)
+        y = group_overall["mean"].to_numpy(dtype=float)
+        sem = group_overall["sem"].to_numpy(dtype=float)
+        axes[1].plot(x, y, linewidth=2.2, alpha=0.95, color=color, marker="o", markersize=5, label=group_name)
+        axes[1].fill_between(x, y - sem, y + sem, alpha=0.14, color=color)
+
+    axes[0].set_title("Participant means within performance groups")
+    axes[1].set_title("Grand means by performance group")
+    axes[1].legend(loc="best", fontsize=8)
+
+    for ax in axes:
+        ax.set_xticks(positions)
+        ax.set_xticklabels(labels, rotation=0)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("Previous normalized reward")
+        ax.set_xlim(-0.25, len(labels) - 0.75)
+
+    axes[0].set_ylabel(y_label or value_col.replace("_", " "))
+    fig.suptitle(title or f"{value_col} by previous reward and performance group")
     fig.tight_layout()
     if show:
         plt.show()
