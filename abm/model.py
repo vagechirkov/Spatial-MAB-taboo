@@ -10,8 +10,8 @@ from mesa.discrete_space import Network
 from .rewards import (
     make_mexican_hat_two_valleys,
     make_parent_and_children_cholesky,
-    make_parent_and_children_gabor,
-    make_parent_and_children_mexican_hat,
+    make_gabor_set,
+    make_DoG_set,
     build_corr_matrix_bare_bones,
     make_parent_and_children_correlated_dog,
 )
@@ -186,7 +186,7 @@ class SocialGPModel(mesa.Model):
             )
         elif reward_env_type == "gabor":
             # Parent + children with target correlation (scalar) and shared frequency
-            parent, child_maps = make_parent_and_children_gabor(
+            parent, child_maps = make_gabor_set(
                 rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
@@ -194,7 +194,7 @@ class SocialGPModel(mesa.Model):
             )
         elif reward_env_type == "dog":
             # Currently implemented as DoG-based mexican hat
-            parent, child_maps = make_parent_and_children_mexican_hat(
+            parent, child_maps = make_DoG_set(
                 rng=self.env_rng,
                 grid_size=grid_size,
                 n_children=n,
@@ -371,6 +371,8 @@ class SocialGPModel(mesa.Model):
                 "reward": lambda a: a.last_reward + 0.5,
                 "policy": lambda a: a.policy_grid,
                 "value": lambda a: a.ucb_grid,
+                "posterior_mean_error": lambda a: a.posterior_mean_error,
+                "mean_posterior_variance": lambda a: a.mean_posterior_variance,
                 "choice": lambda a: a.last_choice,
                 "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
                 **peak_agent_reporters,

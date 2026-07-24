@@ -261,6 +261,7 @@ class SocialGPAgent(CellAgent):
         self.meshgrid_dict = {tuple(coord): i for i, coord in enumerate(self.meshgrid_flatten)}
         self.ucb = np.zeros(len(self.meshgrid_flatten))
         self.policy = np.ones(len(self.meshgrid_flatten)) / len(self.meshgrid_flatten)
+        self._private_posterior_cache = None
 
     @property
     def last_choice(self) -> tuple[int, int]:
@@ -288,6 +289,54 @@ class SocialGPAgent(CellAgent):
             grid[tuple(coord)] = ucb
         return grid
 
+    @property
+    def private_posterior_grids(self) -> tuple[np.ndarray, np.ndarray]:
+        """Private GP posterior mean and variance over all arms."""
+        if self._private_posterior_cache is not None:
+            return self._private_posterior_cache
+
+        if not self.X_observations:
+            shape = self.reward_environment.shape
+            posterior = (np.zeros(shape, dtype=float), np.ones(shape, dtype=float))
+            self._private_posterior_cache = posterior
+            return posterior
+
+        posterior_mean, posterior_std = gp_base_generalization(
+            np.asarray(self.X_observations),
+            np.asarray(self.y_observations),
+            self.meshgrid_flatten,
+            RBF(length_scale=self.length_scale_private),
+            np.full(len(self.X_observations), self.observation_noise_private),
+            self.model.rng.__getstate__(),
+        )
+        shape = self.reward_environment.shape
+        posterior = (
+            np.asarray(posterior_mean).reshape(shape),
+            np.square(np.asarray(posterior_std)).reshape(shape),
+        )
+        self._private_posterior_cache = posterior
+        return posterior
+
+    @property
+    def posterior_mean_grid(self) -> np.ndarray:
+        """Private GP posterior mean after all observations collected so far."""
+        return self.private_posterior_grids[0]
+
+    @property
+    def posterior_variance_grid(self) -> np.ndarray:
+        """Private GP posterior variance at each arm."""
+        return self.private_posterior_grids[1]
+
+    @property
+    def posterior_mean_error(self) -> float:
+        """Mean signed posterior error across arms on the centered reward scale."""
+        return float(np.mean(self.posterior_mean_grid - self.reward_environment))
+
+    @property
+    def mean_posterior_variance(self) -> float:
+        """Mean private GP posterior variance across arms."""
+        return float(np.mean(self.posterior_variance_grid))
+
     def _gather_social_info(self) -> tuple[list[np.ndarray], list[np.ndarray]]:
         neighbours = list(self.model.grid[self.cell.coordinate].neighborhood)
         X_soc, y_soc = [], []
@@ -309,6 +358,7 @@ class SocialGPAgent(CellAgent):
         reward = self._add_noise_to_reward(float(self.reward_environment[coord]))
         self.X_observations.append(coord)
         self.y_observations.append(reward)
+        self._private_posterior_cache = None
 
     def _make_choice(self):
         X_priv = np.array(self.X_observations)
@@ -361,6 +411,7 @@ class SocialGPAgent(CellAgent):
         reward = self._add_noise_to_reward(float(self.reward_environment[coord]))
         self.X_observations.append(coord)
         self.y_observations.append(reward)
+        self._private_posterior_cache = None
 
     def step(self):
         if len(self.X_observations) == 0:
