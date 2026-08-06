@@ -129,6 +129,101 @@ def test_social_history_excludes_unfinished_round():
     assert y_social[0].ravel().tolist() == [0.1]
 
 
+def test_posterior_mean_error_uses_current_observation():
+    model = SocialGPModel(
+        n=1,
+        grid_size=3,
+        length_scale=1.4,
+        observation_noise=0.02,
+        reward_noise_sd=0.0,
+        agent_reporters_to_collect=["posterior_mean_error"],
+        env_seed=11,
+        run_seed=12,
+    )
+    model.step()
+    agent = model.agents[0]
+
+    assert len(agent.X_observations) == 1
+    expected_mean, _ = gp_base_generalization(
+        np.asarray(agent.X_observations),
+        np.asarray(agent.y_observations),
+        agent.meshgrid_flatten,
+        RBF(length_scale=agent.length_scale_private),
+        np.full(len(agent.X_observations), agent.observation_noise_private),
+        rng=0,
+    )
+    expected_grid = expected_mean.reshape(agent.reward_environment.shape)
+    expected_error = np.mean(expected_grid - agent.reward_environment)
+
+    assert_allclose(agent.posterior_mean_grid, expected_grid)
+    assert agent.posterior_mean_error == pytest.approx(expected_error)
+    collected = model.datacollector.get_agent_vars_dataframe()
+    assert collected["posterior_mean_error"].iloc[-1] == pytest.approx(expected_error)
+
+
+def test_mean_posterior_variance_uses_gp_variance_across_arms():
+    model = SocialGPModel(
+        n=1,
+        grid_size=3,
+        length_scale=1.4,
+        observation_noise=0.02,
+        reward_noise_sd=0.0,
+        agent_reporters_to_collect=[
+            "posterior_mean_error",
+            "mean_posterior_variance",
+        ],
+        env_seed=11,
+        run_seed=12,
+    )
+    model.step()
+    agent = model.agents[0]
+
+    _, expected_std = gp_base_generalization(
+        np.asarray(agent.X_observations),
+        np.asarray(agent.y_observations),
+        agent.meshgrid_flatten,
+        RBF(length_scale=agent.length_scale_private),
+        np.full(len(agent.X_observations), agent.observation_noise_private),
+        rng=0,
+    )
+    expected_variance = np.mean(np.square(expected_std))
+
+    assert_allclose(
+        agent.posterior_variance_grid,
+        np.square(expected_std).reshape(agent.reward_environment.shape),
+    )
+    assert agent.mean_posterior_variance == pytest.approx(expected_variance)
+    collected = model.datacollector.get_agent_vars_dataframe()
+    assert collected["mean_posterior_variance"].iloc[-1] == pytest.approx(
+        expected_variance
+    )
+
+
+def test_posterior_mean_error_is_available_in_batch_run():
+    results = mesa.batch_run(
+        SocialGPModel,
+        parameters={
+            "n": 1,
+            "grid_size": 3,
+            "agent_reporters_to_collect": as_batch_fixed([
+                "posterior_mean_error",
+                "mean_posterior_variance",
+            ]),
+            "env_seed": 1,
+            "run_seed": 2,
+        },
+        max_steps=2,
+        display_progress=False,
+        number_processes=1,
+    )
+
+    assert results
+    assert "posterior_mean_error" in results[0]
+    assert np.isfinite(results[0]["posterior_mean_error"])
+    assert "mean_posterior_variance" in results[0]
+    assert np.isfinite(results[0]["mean_posterior_variance"])
+
+
 @pytest.mark.parametrize("mode", ["value_shaping", "social_generalization"])
 def test_mesa_batch_run_smoke(mode):
     results = mesa.batch_run(

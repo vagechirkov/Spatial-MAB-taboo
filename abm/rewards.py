@@ -125,15 +125,288 @@ def _gabor_filter_2d(
     
     return gabor
 
+def sample_gabor_gp(
+    rng,
+    grid_size,
+    frequency=0.1,
+    sigma=3.0,
+    theta=0.0,
+    amplitude=1.0,
+    jitter=1e-8,
+):
+    """Sample a 2-D function from a GP with a Gabor covariance kernel.
+
+    The kernel is a squared-exponential envelope multiplied by a cosine:
+    k(x, x') = amplitude**2 * exp(-||x-x'||**2 / (2*sigma**2))
+                 * cos(2*pi*frequency*u_theta.T@(x-x')).
+    """
+    if grid_size < 1:
+        raise ValueError("grid_size must be positive")
+    if sigma <= 0 or amplitude <= 0:
+        raise ValueError("sigma and amplitude must be positive")
+
+    rows, cols = np.mgrid[:grid_size, :grid_size]
+    points = np.column_stack((rows.ravel(), cols.ravel()))
+    differences = points[:, None, :] - points[None, :, :]
+
+    squared_distances = np.sum(differences**2, axis=-1)
+    direction = np.array([np.sin(theta), np.cos(theta)])
+    projected_distances = differences @ direction
+    covariance = amplitude**2 * np.exp(
+        -squared_distances / (2 * sigma**2)
+    ) * np.cos(2 * np.pi * frequency * projected_distances)
+    covariance.flat[:: covariance.shape[0] + 1] += jitter
+
+    sample = rng.multivariate_normal(np.zeros(points.shape[0]), covariance)
+    return sample.reshape(grid_size, grid_size)
+
+
+def make_gabor_set(
+    rng=None,
+    grid_size=11,
+    n_children=1,
+    target_correlation=1.0,
+    sigma=1.5,
+    frequency=None,
+    theta=0.0,
+    amplitude=1.0,
+    jitter=1e-8,
+):
+    """Generate a parent Gabor-GP grid and correlated child grids.
+
+    The parent and the independent component of every child are sampled from
+    the Gabor-kernel GP implemented by :func:`sample_gabor_gp`.  Each
+    independent component is centered, standardized, and orthogonalized
+    against the parent before mixing, so the empirical Pearson correlation
+    between the flattened parent and each child is ``target_correlation``.
+
+    Returns
+    -------
+    parent : ndarray
+        Parent reward grid of shape ``(grid_size, grid_size)``, scaled to
+        ``[0, 1]``.
+    children : list of ndarray
+        The ``n_children`` child grids, each scaled to ``[0, 1]``.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    if frequency is None:
+        frequency = 0.735/sigma
+    if grid_size < 2:
+        raise ValueError("grid_size must be at least 2 to define correlation")
+    if not isinstance(n_children, (int, np.integer)) or n_children < 0:
+        raise ValueError("n_children must be a non-negative integer")
+    if not np.isfinite(target_correlation) or not -1 <= target_correlation <= 1:
+        raise ValueError("target_correlation must be finite and in [-1, 1]")
+
+    sample_kwargs = dict(
+        grid_size=grid_size,
+        frequency=frequency,
+        sigma=sigma,
+        theta=theta,
+        amplitude=amplitude,
+        jitter=jitter,
+    )
+    parent_raw = sample_gabor_gp(rng, **sample_kwargs)
+    parent_z = parent_raw.ravel() - parent_raw.mean()
+    parent_std = parent_z.std()
+    if parent_std < 1e-12:
+        raise RuntimeError("sampled parent grid has negligible variance")
+    parent_z /= parent_std
+
+    children = []
+    residual_weight = np.sqrt(1.0 - target_correlation**2)
+    parent_energy = np.dot(parent_z, parent_z)
+
+    for _ in range(n_children):
+        independent = sample_gabor_gp(rng, **sample_kwargs).ravel()
+        independent -= independent.mean()
+        residual = independent - (
+            np.dot(independent, parent_z) / parent_energy
+        ) * parent_z
+        residual -= residual.mean()
+        residual_std = residual.std()
+        if residual_std < 1e-12:
+            raise RuntimeError("sampled child residual has negligible variance")
+        residual /= residual_std
+
+        child = target_correlation * parent_z + residual_weight * residual
+        children.append(_min_max(child.reshape(grid_size, grid_size)))
+
+    return _min_max(parent_z.reshape(grid_size, grid_size)), children
+
+
+def sample_DoG_gp(
+    rng=None,
+    grid_size=11,
+    sigma_inner=1.0,
+    sigma_outer=2.0,
+    amplitude=1.0,
+    jitter=1e-10,
+):
+    """Sample a 2-D GP with a difference-of-Gaussians prior kernel.
+
+    Let ``h = G(sigma_inner) - G(sigma_outer)``, where each ``G`` is a
+    normalized isotropic Gaussian density.  The covariance is the stationary
+    autocorrelation kernel
+
+    ``k(x, x') = amplitude**2 * <h(x - .), h(x' - .)> / <h, h>``.
+
+    Expanding the convolution gives a difference-of-Gaussians-shaped kernel
+    with three Gaussian terms.  Defining the kernel as an autocorrelation is
+    important: it guarantees positive semidefiniteness, whereas simply
+    subtracting two RBF covariance kernels does not generally define a valid
+    GP.  ``amplitude`` is the marginal standard deviation before adding
+    numerical jitter.
+
+    Parameters
+    ----------
+    rng : numpy.random.Generator, optional
+        Random number generator. A new generator is used when omitted.
+    grid_size : int, default=11
+        Side length of the square sampling grid.
+    sigma_inner, sigma_outer : float
+        Spatial standard deviations of the normalized Gaussian filters, in
+        grid-cell units. ``sigma_outer`` must exceed ``sigma_inner``.
+    amplitude : float, default=1.0
+        Marginal standard deviation of the GP.
+    jitter : float, default=1e-10
+        Non-negative diagonal term used for numerical stability.
+
+    Returns
+    -------
+    ndarray
+        A sample with shape ``(grid_size, grid_size)``.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    if not isinstance(grid_size, (int, np.integer)) or grid_size < 1:
+        raise ValueError("grid_size must be a positive integer")
+    if not np.isfinite(sigma_inner) or sigma_inner <= 0:
+        raise ValueError("sigma_inner must be finite and positive")
+    if not np.isfinite(sigma_outer) or sigma_outer <= sigma_inner:
+        raise ValueError("sigma_outer must be finite and greater than sigma_inner")
+    if not np.isfinite(amplitude) or amplitude <= 0:
+        raise ValueError("amplitude must be finite and positive")
+    if not np.isfinite(jitter) or jitter < 0:
+        raise ValueError("jitter must be finite and non-negative")
+
+    rows, cols = np.mgrid[:grid_size, :grid_size]
+    points = np.column_stack((rows.ravel(), cols.ravel()))
+    differences = points[:, None, :] - points[None, :, :]
+    squared_distances = np.sum(differences**2, axis=-1).astype(np.longdouble)
+
+    def gaussian_overlap(variance):
+        # Density of N(0, variance * I_2), evaluated at pairwise offsets.
+        variance = np.longdouble(variance)
+        return np.exp(-squared_distances / (2.0 * variance)) / (
+            2.0 * np.longdouble(np.pi) * variance
+        )
+
+    inner_variance = 2.0 * sigma_inner**2
+    cross_variance = sigma_inner**2 + sigma_outer**2
+    outer_variance = 2.0 * sigma_outer**2
+    covariance = (
+        gaussian_overlap(inner_variance)
+        - 2.0 * gaussian_overlap(cross_variance)
+        + gaussian_overlap(outer_variance)
+    )
+
+    # Normalize k(0) to amplitude**2. All diagonal entries are identical
+    # because this is a stationary kernel.
+    covariance *= np.longdouble(amplitude)**2 / covariance[0, 0]
+    covariance = np.asarray(covariance, dtype=float)
+    covariance = (covariance + covariance.T) / 2.0
+
+    # Project away negative eigenvalues caused solely by cancellation in the
+    # three-term DoG expansion. Analytically all eigenvalues are non-negative
+    # because the kernel is an autocorrelation.
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    eigenvalues = np.maximum(eigenvalues, 0.0) + jitter
+    sample = eigenvectors @ (
+        np.sqrt(eigenvalues) * rng.standard_normal(points.shape[0])
+    )
+    return sample.reshape(grid_size, grid_size)
+
+
+def make_DoG_set(
+    rng=None,
+    grid_size=11,
+    n_children=1,
+    target_correlation=1.0,
+    sigma_inner=1.0,
+    sigma_outer=2.0,
+    amplitude=1.0,
+    jitter=1e-10,
+):
+    """Generate a parent DoG-GP grid and correlated child grids.
+
+    Independent draws from :func:`sample_DoG_gp` provide the parent and child
+    residuals. Each residual is orthogonalized against the centered parent,
+    making its flattened empirical Pearson correlation with the parent equal
+    to ``target_correlation`` (up to floating-point precision).
+
+    Returns
+    -------
+    parent : ndarray
+        Parent grid of shape ``(grid_size, grid_size)``, scaled to ``[0, 1]``.
+    children : list of ndarray
+        ``n_children`` grids of the same shape, each scaled to ``[0, 1]``.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    if not isinstance(grid_size, (int, np.integer)) or grid_size < 2:
+        raise ValueError("grid_size must be an integer of at least 2")
+    if not isinstance(n_children, (int, np.integer)) or n_children < 0:
+        raise ValueError("n_children must be a non-negative integer")
+    if not np.isfinite(target_correlation) or not -1 <= target_correlation <= 1:
+        raise ValueError("target_correlation must be finite and in [-1, 1]")
+
+    sample_kwargs = dict(
+        grid_size=grid_size,
+        sigma_inner=sigma_inner,
+        sigma_outer=sigma_outer,
+        amplitude=amplitude,
+        jitter=jitter,
+    )
+    parent_raw = sample_DoG_gp(rng, **sample_kwargs)
+    parent_z = parent_raw.ravel() - parent_raw.mean()
+    parent_std = parent_z.std()
+    if parent_std < 1e-12:
+        raise RuntimeError("sampled parent grid has negligible variance")
+    parent_z /= parent_std
+
+    children = []
+    residual_weight = np.sqrt(1.0 - target_correlation**2)
+    parent_energy = np.dot(parent_z, parent_z)
+
+    for _ in range(n_children):
+        independent = sample_DoG_gp(rng, **sample_kwargs).ravel()
+        independent -= independent.mean()
+        residual = independent - (
+            np.dot(independent, parent_z) / parent_energy
+        ) * parent_z
+        residual -= residual.mean()
+        residual_std = residual.std()
+        if residual_std < 1e-12:
+            raise RuntimeError("sampled child residual has negligible variance")
+        residual /= residual_std
+
+        child = target_correlation * parent_z + residual_weight * residual
+        children.append(_min_max(child.reshape(grid_size, grid_size)))
+
+    return _min_max(parent_z.reshape(grid_size, grid_size)), children
+
+
 def make_parent_and_children_gabor(
     rng,
     grid_size=11,
-    n_children=4,
+    n_children=1,
     frequency=2.0,
     theta_parent=0.0,
     sigma=None,
     phase_parent=None,
-    correlation=0.6,
+    correlation=1.0,
     theta_children=None,
     phase_children=None,
     center=None,
