@@ -1,0 +1,418 @@
+from collections.abc import Sequence
+
+import mesa
+import networkx as nx
+import numpy as np
+
+from .agent import SocialGPAgent
+from mesa import DataCollector
+from mesa.discrete_space import Network
+from .rewards import (
+    make_mexican_hat_two_valleys,
+    make_parent_and_children_cholesky,
+    make_gabor_set,
+    make_DoG_set,
+    build_corr_matrix_bare_bones,
+    make_parent_and_children_correlated_dog,
+)
+from .rewards_clean import create_mexican_hat_gp_set
+from .reporter_helpers import (
+    find_global_peak_coordinates,
+    find_local_peak_coordinates,
+    make_peak_agent_reporters,
+    normalize_reporter_selection,
+)
+
+SOCIAL_INFORMATION_MODES = {"value_shaping", "social_generalization"}
+
+def _build_network(network_type, n):
+    if network_type == "fully_connected":
+        return nx.complete_graph(n)
+    raise ValueError(f"Unknown network_type '{network_type}'")
+
+
+def as_batch_fixed(value):
+    """
+    Wrap a value so mesa.batch_run treats it as a single fixed value.
+
+    Mesa interprets iterables as sweep axes. Use this for per-agent vectors,
+    e.g. `beta=as_batch_fixed([0.05, 0.10])`.
+    """
+    return [value]
+
+
+def _unwrap_singleton_sequence(value):
+    """Unwrap one-level singleton wrappers used to bypass mesa.batch_run sweeps."""
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return value.item()
+        value = value.tolist()
+
+    if (
+        isinstance(value, Sequence)
+        and not isinstance(value, (str, bytes))
+        and len(value) == 1
+    ):
+        inner_value = value[0]
+        if isinstance(inner_value, (list, tuple, np.ndarray)):
+            return _unwrap_singleton_sequence(inner_value)
+
+    return value
+
+
+def _normalize_agent_parameter(value, n: int, parameter_name: str) -> list[float]:
+    """
+    Normalize agent-level parameters to length `n`.
+
+    Accepted input formats:
+    - scalar: shared across all agents
+    - length-1 sequence: broadcast to all agents
+    - length-n sequence: per-agent values
+    """
+    value = _unwrap_singleton_sequence(value)
+
+    if isinstance(value, np.ndarray):
+        if value.ndim == 0:
+            return [float(value.item())] * n
+        values = value.tolist()
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        values = list(value)
+    else:
+        try:
+            scalar_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                f"{parameter_name} must be numeric or a numeric sequence. "
+                f"Got: {value!r}"
+            ) from exc
+        return [scalar_value] * n
+
+    if len(values) == 0:
+        raise ValueError(f"{parameter_name} cannot be empty")
+
+    if len(values) == 1:
+        values = values * n
+    elif len(values) != n:
+        raise ValueError(
+            f"{parameter_name} must be a scalar, length-1 sequence, "
+            f"or length-{n} sequence. Got length {len(values)}"
+        )
+
+    try:
+        return [float(v) for v in values]
+    except (TypeError, ValueError) as exc:
+        raise TypeError(
+            f"{parameter_name} must contain numeric values. "
+            f"Got: {values!r}"
+        ) from exc
+
+class SocialGPModel(mesa.Model):
+    """
+    GP-UCB model with model-wide social-information learning on correlated landscapes.
+
+    Agent parameters (`length_scale`, `observation_noise`, `beta`, `tau`, `alpha`,
+    `sigma_social`) can be provided as scalars (shared), length-1 sequences
+    (broadcast), or length-n sequences (heterogeneous values per agent).
+
+    For mesa.batch_run, wrap heterogeneous vectors with `as_batch_fixed(...)`
+    so they are passed as fixed values instead of sweep dimensions.
+    """
+    def __init__(
+        self,
+        *,
+        n: int = 4,
+        grid_size: int = 11,
+        length_scale: float | Sequence[float] | np.ndarray = 1.11, # for agents
+        observation_noise: float | Sequence[float] | np.ndarray = 0.01,
+        beta: float | Sequence[float] | np.ndarray = 0.5,
+        tau: float | Sequence[float] | np.ndarray = 0.01,
+        alpha: float | Sequence[float] | np.ndarray = 0.6,
+        social_information_mode: str = "value_shaping",
+        sigma_social: float | Sequence[float] | np.ndarray = 0.0,
+        network_type: str = "fully_connected",
+        reward_noise_sd : float = 0.001,
+        reward_env_type: str = "gp",
+        reward_env_params: dict | None = None,
+        corr_matrix: np.ndarray | None = None,
+        summary_window: int = 5,
+        collect_agent_reporters: bool = True,
+        model_reporters_to_collect: list[str] | tuple[str, ...] | None = None,
+        agent_reporters_to_collect: list[str] | tuple[str, ...] | None = None,
+        env_seed=None, 
+        run_seed=None, 
+        **kwargs,
+    ):
+        kwargs.pop("rng", None)  
+
+        super().__init__(**kwargs)
+
+        self.env_seed = env_seed
+        self.run_seed = run_seed
+
+        self.rng = np.random.default_rng(run_seed)
+        self.env_rng = np.random.default_rng(env_seed)
+  
+        self.num_agents = n
+        self.grid_size = grid_size
+        self.reward_noise_sd = reward_noise_sd
+        if social_information_mode not in SOCIAL_INFORMATION_MODES:
+            raise ValueError(
+                "social_information_mode must be one of "
+                f"{sorted(SOCIAL_INFORMATION_MODES)}. Got: {social_information_mode!r}"
+            )
+        self.social_information_mode = social_information_mode
+        if summary_window <= 0:
+            raise ValueError("summary_window must be a positive integer")
+        self.summary_window = int(summary_window)
+
+        # Set reward peak location (used for gabor and mexican hat)
+        if reward_env_params and 'center' in reward_env_params:
+            self.reward_peak = np.array(reward_env_params['center'])
+        # Generate reward environments
+        reward_env_params = {} if reward_env_params is None else dict(reward_env_params)
+
+        if reward_env_type == "gp":
+            # Correlated GP landscapes via a task correlation matrix
+            if corr_matrix is None:
+                corr_matrix = build_corr_matrix_bare_bones(n + 1)
+            env_length_scale = float(reward_env_params.pop("length_scale", 2.0))
+            parent, child_maps = make_parent_and_children_cholesky(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                length_scale=env_length_scale,
+                corr_matrix=corr_matrix,
+                **reward_env_params,
+            )
+        elif reward_env_type == "gabor":
+            # Parent + children with target correlation (scalar) and shared frequency
+            parent, child_maps = make_gabor_set(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+        elif reward_env_type == "dog":
+            # Currently implemented as DoG-based mexican hat
+            parent, child_maps = make_DoG_set(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+        elif reward_env_type == "corr_dog":
+            # Correlated DoG landscapes
+            parent, child_maps, self.reward_peak = make_parent_and_children_correlated_dog(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0
+        elif reward_env_type == "mexican_hat_gp":
+            # Mexican Hat GP landscapes
+            parent, child_maps, self.reward_peak, _, self.s = create_mexican_hat_gp_set(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0
+        elif reward_env_type == "oracle_gp":
+            # Mexican Hat GP landscapes
+            parent, child_maps, self.reward_peak, self.mh_kernel, self.s = create_mexican_hat_gp_set(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0
+        elif reward_env_type == "mexican_hat_2_valleys":
+            parent, child_maps, self.reward_peak = make_mexican_hat_two_valleys(
+                rng=self.env_rng,
+                grid_size=grid_size,
+                n_children=n,
+                **reward_env_params,
+            )
+            if 'sigma_inner' in reward_env_params:
+                self.peak_radius = reward_env_params['sigma_inner']
+            else:
+                # NOTE: assumes reward environment generation maintains this ratio.  Must change if we change reward env generation logic.
+                self.peak_radius = reward_env_params['length_scale'] // 2.0 
+
+        else:
+            raise ValueError(
+                "Unknown reward_env_type. Expected one of: "
+                "'gp', 'gabor', 'mexican_hat' (alias: 'dog'). "
+                f"Got: {reward_env_type!r}"
+            )
+
+        # Keep reference (handy for debugging/visualization)
+        self.reward_parent = parent
+        self.reward_maps = child_maps
+
+        # Build social network
+        G = _build_network(network_type, n)
+        self.grid = Network(G, random=self.random)
+
+        # Create agents
+        # Here we shift maps to be zero-centered around 0.5 (original maps are in [0, 1])
+        # This matches the zero-mean GP assumption if we consider 0.5 as the baseline.
+        # Alternatively, we just use them as is. Keeping consistent with previous logic.
+        child_maps = [c - 0.5 for c in child_maps]
+
+        length_scale_by_agent = _normalize_agent_parameter(length_scale, n, "length_scale")
+        observation_noise_by_agent = _normalize_agent_parameter(
+            observation_noise,
+            n,
+            "observation_noise",
+        )
+        beta_by_agent = _normalize_agent_parameter(beta, n, "beta")
+        tau_by_agent = _normalize_agent_parameter(tau, n, "tau")
+        alpha_by_agent = _normalize_agent_parameter(alpha, n, "alpha")
+        sigma_social_by_agent = _normalize_agent_parameter(
+            sigma_social, n, "sigma_social"
+        )
+        if any(
+            not np.isfinite(value) or value < 0
+            for value in sigma_social_by_agent
+        ):
+            raise ValueError("sigma_social values must be finite and nonnegative")
+
+        self.agent_hyperparameters = {
+            "length_scale": length_scale_by_agent,
+            "observation_noise": observation_noise_by_agent,
+            "beta": beta_by_agent,
+            "tau": tau_by_agent,
+            "alpha": alpha_by_agent,
+            "sigma_social": sigma_social_by_agent,
+        }
+
+        SocialGPAgent.create_agents(
+            self,
+            n,
+            cell=self.grid.all_cells.cells,
+            reward_environment=child_maps,
+            length_scale_private=length_scale_by_agent,
+            length_scale_social=length_scale_by_agent,
+            observation_noise_private=observation_noise_by_agent,
+            observation_noise_social=observation_noise_by_agent,
+            beta_private=beta_by_agent,
+            beta_social=beta_by_agent,
+            tau=tau_by_agent,
+            alpha=alpha_by_agent,
+            sigma_social=sigma_social_by_agent,
+            social_information_mode=[social_information_mode] * n,
+        )
+
+        # Reporter radii are in grid-distance units.
+        self.global_peak_report_radius = 1.0
+        self.local_peak_report_radius  = 3.0
+
+        # Local peak locations are static because reward maps are static.
+        self.local_peak_coordinates = {
+            agent.unique_id: find_local_peak_coordinates(agent.reward_environment)
+            for agent in self.grid.agents
+        }
+        self.global_peak_coordinates = {
+            agent.unique_id: find_global_peak_coordinates(agent.reward_environment)
+            for agent in self.grid.agents
+        }
+
+        peak_agent_reporters = make_peak_agent_reporters(
+            self.global_peak_coordinates,
+            self.local_peak_coordinates,
+            global_radius=self.global_peak_report_radius,
+            local_radius=self.local_peak_report_radius,
+        )
+
+        available_model_reporters = {
+            "mean_cumulative_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) + 0.5 * m.steps,
+            "mean_reward": lambda m: np.mean([a.total_reward for a in m.grid.agents]) / m.steps + 0.5,
+        }
+
+        if model_reporters_to_collect is None:
+            model_reporters = dict(available_model_reporters)
+        else:
+            requested_model_reporters = normalize_reporter_selection(
+                model_reporters_to_collect,
+                "model_reporters_to_collect",
+            )
+            unknown_model_reporters = sorted(
+                set(requested_model_reporters) - set(available_model_reporters)
+            )
+            if unknown_model_reporters:
+                raise ValueError(
+                    "Unknown model reporters requested: "
+                    f"{unknown_model_reporters}. "
+                    f"Available: {sorted(available_model_reporters)}"
+                )
+            model_reporters = {
+                reporter_name: available_model_reporters[reporter_name]
+                for reporter_name in requested_model_reporters
+            }
+
+        agent_reporters = {}
+        if collect_agent_reporters:
+            available_agent_reporters = {
+                "reward": lambda a: a.last_reward + 0.5,
+                "policy": lambda a: a.policy_grid,
+                "value": lambda a: a.ucb_grid,
+                "posterior_mean_error": lambda a: a.posterior_mean_error,
+                "mean_posterior_variance": lambda a: a.mean_posterior_variance,
+                "choice": lambda a: a.last_choice,
+                "cumulative_reward": lambda a: a.total_reward + 0.5 * a.model.steps,
+                **peak_agent_reporters,
+            }
+
+            if agent_reporters_to_collect is None:
+                requested_agent_reporters = ["reward", "global_max", "local_max", "no_max", "cumulative_reward"]
+            else:
+                requested_agent_reporters = normalize_reporter_selection(
+                    agent_reporters_to_collect,
+                    "agent_reporters_to_collect",
+                )
+
+            unknown_agent_reporters = sorted(
+                set(requested_agent_reporters) - set(available_agent_reporters)
+            )
+            if unknown_agent_reporters:
+                raise ValueError(
+                    "Unknown agent reporters requested: "
+                    f"{unknown_agent_reporters}. "
+                    f"Available: {sorted(available_agent_reporters)}"
+                )
+            agent_reporters = {
+                reporter_name: available_agent_reporters[reporter_name]
+                for reporter_name in requested_agent_reporters
+            }
+
+        self.datacollector = DataCollector(
+            model_reporters=model_reporters,
+            agent_reporters=agent_reporters,
+        )
+
+    def step(self):
+        self.agents.shuffle_do("step")
+        self.datacollector.collect(self)
+
+if __name__ == "__main__":
+    m = SocialGPModel(n=5, grid_size=20, alpha=0.5, seed=42)
+    for _ in range(20):
+        m.step()
+    
+    results = m.datacollector.get_model_vars_dataframe()
+    agent_results = m.datacollector.get_agent_vars_dataframe()
