@@ -1033,11 +1033,11 @@ def make_block_visualizations(
             x_col="block",
             average_within=average_within,
             within_series_reduce="mean",
-            x_label="Block",
+            x_label="Round",
             y_label="Mean reward",
             left_title=left_title,
             legend_prefix=legend_prefix,
-            title=f"{title_prefix}: mean reward by block",
+            title=f"{title_prefix}: mean reward by round",
             show=False,
         )
 
@@ -1050,11 +1050,11 @@ def make_block_visualizations(
             x_col="block",
             average_within=average_within,
             within_series_reduce="median",
-            x_label="Block",
+            x_label="Round",
             y_label="Median RT",
             left_title=left_title,
             legend_prefix=legend_prefix,
-            title=f"{title_prefix}: median RT by block",
+            title=f"{title_prefix}: median RT by round",
             show=False,
         )
 
@@ -1066,11 +1066,11 @@ def make_block_visualizations(
             x_col="block",
             average_within=average_within,
             within_series_reduce="median",
-            x_label="Block",
+            x_label="Round",
             y_label="Median search distance",
             left_title=left_title,
             legend_prefix=legend_prefix,
-            title=f"{title_prefix}: search distance by block",
+            title=f"{title_prefix}: search distance by round",
             show=False,
         )
 
@@ -1082,11 +1082,11 @@ def make_block_visualizations(
             x_col="block",
             average_within=average_within,
             within_series_reduce="mean",
-            x_label="Block",
+            x_label="Round",
             y_label="Global-max indicator",
             left_title=left_title,
             legend_prefix=legend_prefix,
-            title=f"{title_prefix}: global-max indicator by block",
+            title=f"{title_prefix}: global-max indicator by round",
             show=False,
         )
 
@@ -1098,11 +1098,11 @@ def make_block_visualizations(
             x_col="block",
             average_within=average_within,
             within_series_reduce="mean",
-            x_label="Block",
+            x_label="Round",
             y_label="Local-max indicator",
             left_title=left_title,
             legend_prefix=legend_prefix,
-            title=f"{title_prefix}: local-max indicator by block",
+            title=f"{title_prefix}: local-max indicator by round",
             show=False,
         )
 

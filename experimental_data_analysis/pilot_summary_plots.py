@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Advanced summary analyses for bandit pilot data."""
+"""Summary analyses for bandit pilot data."""
 
 from __future__ import annotations
 
@@ -12,17 +12,17 @@ import numpy as np
 import pandas as pd
 
 
-def _load_visualize_bandit_data_module():
-    module_path = Path(__file__).with_name("visualize_bandit_data.py")
-    spec = importlib.util.spec_from_file_location("visualize_bandit_data", module_path)
+def _load_pilot_participant_plots_module():
+    module_path = Path(__file__).with_name("pilot_participant_plots.py")
+    spec = importlib.util.spec_from_file_location("pilot_participant_plots", module_path)
     if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load visualize_bandit_data from {module_path}")
+        raise ImportError(f"Could not load pilot_participant_plots from {module_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-_viz = _load_visualize_bandit_data_module()
+_viz = _load_pilot_participant_plots_module()
 
 
 def _sem(values: pd.Series) -> float:
@@ -39,15 +39,35 @@ def _coerce_reduce_name(reduce_name: str):
     return reduce_name
 
 
-def _performance_group_order() -> Sequence[str]:
-    return ("low", "middle", "high")
+def _performance_group_order(n_groups: int = 3) -> Sequence[str]:
+    if n_groups < 2:
+        raise ValueError("n_groups must be at least 2.")
+    if n_groups == 2:
+        return ("low", "high")
+    if n_groups == 3:
+        return ("low", "middle", "high")
+    return tuple(f"group_{index + 1}" for index in range(n_groups))
 
 
-def _performance_group_colors() -> Dict[str, str]:
-    return {
+def _performance_group_order_from_data(df: pd.DataFrame, group_col: str) -> Sequence[str]:
+    group_data = df[group_col]
+    if isinstance(group_data.dtype, pd.CategoricalDtype):
+        return tuple(str(category) for category in group_data.cat.categories)
+    return tuple(str(group) for group in group_data.dropna().drop_duplicates())
+
+
+def _performance_group_colors(group_order: Optional[Sequence[str]] = None) -> Dict[str, str]:
+    base_colors = {
         "low": "tab:blue",
         "middle": "tab:orange",
         "high": "tab:green",
+    }
+    if group_order is None:
+        return base_colors
+    palette = plt.get_cmap("tab10").colors
+    return {
+        group_name: base_colors.get(group_name, palette[index % len(palette)])
+        for index, group_name in enumerate(group_order)
     }
 
 
@@ -310,11 +330,12 @@ def plot_previous_reward_conditioned_by_performance(
     )
 
     pid_col = _viz.choose_participant_id_col(df, participant_id_col)
-    colors = _performance_group_colors()
+    group_order = _performance_group_order_from_data(df, group_col)
+    colors = _performance_group_colors(group_order)
     positions = np.arange(len(labels))
     fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharey=False)
 
-    for group_name in _performance_group_order():
+    for group_name in group_order:
         group_participants = participant_summary[participant_summary[group_col] == group_name]
         color = colors[group_name]
         for _, sub in group_participants.groupby(pid_col, sort=True):
@@ -356,8 +377,9 @@ def assign_performance_groups(
     *,
     participant_id_col: Optional[str] = None,
     performance_col: str = "reward",
+    n_groups: int = 3,
 ) -> pd.DataFrame:
-    """Assign low/middle/high participant performance groups from overall reward."""
+    """Divide participants into quantile groups based on overall reward."""
     if performance_col not in df.columns:
         raise ValueError(f"Performance column not found: {performance_col}")
 
@@ -375,17 +397,18 @@ def assign_performance_groups(
     if participant_reward.empty:
         raise ValueError("No participant performance values available.")
 
+    group_order = _performance_group_order(n_groups)
     ranked = participant_reward[performance_col].rank(method="first")
     participant_reward["performance_group"] = pd.qcut(
         ranked,
-        q=3,
-        labels=list(_performance_group_order()),
+        q=n_groups,
+        labels=list(group_order),
     )
 
     merged = df.merge(participant_reward[[pid_col, "performance_group"]], on=pid_col, how="left")
     merged["performance_group"] = pd.Categorical(
         merged["performance_group"],
-        categories=list(_performance_group_order()),
+        categories=list(group_order),
         ordered=True,
     )
     return merged
@@ -452,7 +475,7 @@ def plot_performance_group_trends(
     y_label: Optional[str] = None,
     show: bool = False,
 ):
-    """Plot participant-level lines and grouped grand averages by performance tercile."""
+    """Plot participant-level lines and grouped grand averages by performance group."""
     participant_summary, overall_summary = _summarize_performance_group_trends(
         df,
         value_col,
@@ -466,10 +489,11 @@ def plot_performance_group_trends(
     )
 
     pid_col = _viz.choose_participant_id_col(df, participant_id_col)
-    colors = _performance_group_colors()
+    group_order = _performance_group_order_from_data(df, group_col)
+    colors = _performance_group_colors(group_order)
     fig, axes = plt.subplots(1, 2, figsize=(10.0, 3.7), sharex=True, sharey=False)
 
-    for group_name in _performance_group_order():
+    for group_name in group_order:
         group_participants = participant_summary[participant_summary[group_col] == group_name]
         color = colors[group_name]
         for _, sub in group_participants.groupby(pid_col, sort=True):
@@ -540,8 +564,8 @@ def make_performance_group_visualizations(
             within_series_reduce="mean",
             line_center_reduce="mean",
             overall_center_reduce="mean",
-            title="Reward by block and performance group",
-            x_label="Block",
+            title="Reward by round and performance group",
+            x_label="Round",
             y_label="Mean reward",
             show=False,
         )
@@ -570,8 +594,8 @@ def make_performance_group_visualizations(
             within_series_reduce="median",
             line_center_reduce="median",
             overall_center_reduce="mean",
-            title="RT by block and performance group",
-            x_label="Block",
+            title="RT by round and performance group",
+            x_label="Round",
             y_label="Median RT [ms]",
             show=False,
         )
@@ -600,8 +624,8 @@ def make_performance_group_visualizations(
             within_series_reduce="median",
             line_center_reduce="median",
             overall_center_reduce="mean",
-            title="Search distance by block and performance group",
-            x_label="Block",
+            title="Search distance by round and performance group",
+            x_label="Round",
             y_label="Median search distance",
             show=False,
         )
@@ -634,8 +658,8 @@ def make_performance_group_visualizations(
                 within_series_reduce="mean",
                 line_center_reduce="mean",
                 overall_center_reduce="mean",
-                title=f"{title_prefix} by block and performance group",
-                x_label="Block",
+                title=f"{title_prefix} by round and performance group",
+                x_label="Round",
                 y_label=label,
                 show=False,
             )
