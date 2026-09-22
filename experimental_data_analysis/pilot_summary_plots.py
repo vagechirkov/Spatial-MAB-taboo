@@ -25,6 +25,248 @@ def _load_pilot_participant_plots_module():
 _viz = _load_pilot_participant_plots_module()
 
 
+def summarize_choice_reselection(
+    df: pd.DataFrame, *, participant_id_col: Optional[str] = None,
+    group_col: str = "performance_group",
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Return annotated trials, participant/env fractions, and group/env quartiles.
+
+    Exact coordinate repetitions (including consecutive repeats) count only
+    within a participant/environment/block. Every observed turn contributes to
+    the denominator, including each block's first turn. Counts are pooled over
+    blocks before calculating fractions; group quantiles weight participants
+    equally and use linear interpolation. Input data and assignments are kept.
+    """
+    pid = _viz.choose_participant_id_col(df, participant_id_col)
+    numeric = ["env", "block", "trial", "choice_x", "choice_y"]
+    required = [pid, group_col, *numeric]
+    missing = set(required).difference(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns: {sorted(missing)}")
+    work = df.copy()
+    for col in numeric:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    if not np.isfinite(work[numeric].to_numpy(dtype=float)).all():
+        raise ValueError("Environment, block, trial and coordinates must be finite numbers")
+    for col in [pid, group_col]:
+        if work[col].isna().any() or work[col].map(
+            lambda value: isinstance(value, (int, float, np.number)) and not np.isfinite(value)
+        ).any():
+            raise ValueError("Participant and performance-group identifiers must be present and finite")
+    membership = work[[pid, group_col]].drop_duplicates()
+    if membership[pid].duplicated().any():
+        raise ValueError("Each participant must have a single performance group")
+    trajectory = [pid, "env", "block"]
+    if work.duplicated([*trajectory, "trial"]).any():
+        raise ValueError("Duplicate trials within a participant/environment/block")
+    work = work.sort_values(["block", "trial"], kind="mergesort").copy()
+    work["is_reselection"] = work.duplicated([*trajectory, "choice_x", "choice_y"])
+    participants = (
+        work.groupby([pid, "env"], observed=True, sort=False)["is_reselection"]
+        .agg(n_turns="size", n_reselections="sum").reset_index()
+        .merge(membership, on=pid, how="left", validate="many_to_one")
+    )
+    participants["reselection_fraction"] = participants.n_reselections / participants.n_turns
+    groups = (
+        participants.groupby([group_col, "env"], observed=True)["reselection_fraction"]
+        .agg(n_participants="count", median="median",
+             q25=lambda values: values.quantile(.25, interpolation="linear"),
+             q75=lambda values: values.quantile(.75, interpolation="linear"))
+        .reset_index()
+    )
+    groups["iqr"] = groups.q75 - groups.q25
+    return work, participants, groups
+
+
+def plot_choice_reselection_by_performance(
+    participant_summary: pd.DataFrame, group_summary: pd.DataFrame, *,
+    group_col: str = "performance_group", show: bool = False,
+):
+    """Participant fractions with group medians and Q25-Q75 intervals by env."""
+    order = _performance_group_order_from_data(participant_summary, group_col)
+    colors = _performance_group_colors(order)
+    envs = sorted(participant_summary.env.unique())
+    positions = {env: index for index, env in enumerate(envs)}
+    fig, axes = plt.subplots(1, max(1, len(order)), figsize=(6 * max(1, len(order)), 4),
+                             sharex=True, sharey=True, squeeze=False)
+    for ax, group in zip(axes.flat, order):
+        points = participant_summary.loc[participant_summary[group_col].eq(group)]
+        stats = group_summary.loc[group_summary[group_col].eq(group)].sort_values("env")
+        ax.scatter(points.env.map(positions), points.reselection_fraction,
+                   color=colors[group], alpha=.25, s=22, label="Participants")
+        if stats.empty:
+            ax.text(.5, .5, "No observations", ha="center", transform=ax.transAxes)
+        else:
+            ax.errorbar(stats.env.map(positions), stats["median"],
+                        yerr=[stats["median"] - stats.q25, stats.q75 - stats["median"]],
+                        fmt="o", capsize=4, color=colors[group], label="Median and Q25-Q75")
+        ax.set(title=str(group), xticks=list(positions.values()), xticklabels=[str(e) for e in envs],
+               ylim=(0, 1), xlabel="Environment")
+        ax.grid(axis="y", alpha=.2)
+        ax.legend()
+    if not order:
+        axes.flat[0].text(.5, .5, "No observations", ha="center", transform=axes.flat[0].transAxes)
+        axes.flat[0].set_ylim(0, 1)
+    axes.flat[0].set_ylabel("Fraction of turns reselecting a past choice")
+    fig.suptitle("Reselection by performance group")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
+
+
+FIRST_HIT_METRICS = (
+    "search_distance_median", "search_distance_iqr", "reward_median", "reward_iqr",
+)
+
+
+def _iqr(values: pd.Series) -> float:
+    """Q75 minus Q25 using linear interpolation; empty=NaN, singleton=0."""
+    return float(values.quantile(0.75, interpolation="linear") - values.quantile(0.25, interpolation="linear"))
+
+
+def extract_first_global_max_windows(
+    df: pd.DataFrame, *, window_size: int = 5,
+    participant_id_col: Optional[str] = None, reward_col: str = "normalized_score",
+) -> pd.DataFrame:
+    """One first radius-hit per participant/environment, selected across blocks.
+
+    Windows exclude the hit trial (including its incoming movement). A complete
+    window needs consecutive trial numbers in the same block and finite values.
+    IQR is Q75 minus Q25 with linear interpolation (zero for a singleton). Ineligible first hits are retained;
+    later hits never replace them. Input data are not modified.
+    """
+    if isinstance(window_size, bool) or not isinstance(window_size, (int, np.integer)) or window_size < 1:
+        raise ValueError("window_size must be a positive integer")
+    pid = _viz.choose_participant_id_col(df, participant_id_col)
+    required = [pid, "env", "block", "trial", "hit_global_max", "search_distance", reward_col]
+    missing = set(required).difference(df.columns)
+    if missing:
+        raise ValueError(f"Missing columns: {sorted(missing)}")
+    work = df[required].copy()
+    for col in required[1:]:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+    if work[[pid, "env", "block", "trial"]].isna().any().any():
+        raise ValueError("Participant, environment, block and trial identifiers must be present")
+    if work.duplicated([pid, "env", "block", "trial"]).any():
+        raise ValueError("Duplicate trials within a participant/environment/block")
+    work = work.sort_values(["block", "trial"], kind="mergesort")
+    rows = []
+    for (participant, env), trajectory in work.groupby([pid, "env"], sort=False, observed=True):
+        hits = trajectory.loc[trajectory.hit_global_max.eq(1)]
+        if hits.empty:
+            continue
+        hit = hits.iloc[0]
+        prior = trajectory.loc[
+            trajectory.block.eq(hit.block) & trajectory.trial.lt(hit.trial)
+        ].tail(window_size)
+        reason = ""
+        if len(prior) < window_size:
+            reason = "insufficient_history"
+        elif not np.array_equal(prior.trial.to_numpy(), np.arange(hit.trial - window_size, hit.trial)):
+            reason = "nonconsecutive_trials"
+        elif not np.isfinite(prior[["search_distance", reward_col]].to_numpy(dtype=float)).all():
+            reason = "nonfinite_window_values"
+        row = {pid: participant, "env": env, "hit_block": hit.block,
+               "hit_trial": hit.trial, "window_size": window_size,
+               "eligible": not reason, "exclusion_reason": reason}
+        for source, prefix in [("search_distance", "search_distance"), (reward_col, "reward")]:
+            row[f"{prefix}_median"] = prior[source].median() if not reason else np.nan
+            row[f"{prefix}_iqr"] = _iqr(prior[source]) if not reason else np.nan
+        rows.append(row)
+    return pd.DataFrame(rows, columns=[pid, "env", "hit_block", "hit_trial", "window_size",
+                                      "eligible", "exclusion_reason", *FIRST_HIT_METRICS])
+
+
+def summarize_first_global_max_windows(
+    events: pd.DataFrame, population: pd.DataFrame, *,
+    participant_id_col: Optional[str] = None, group_col: str = "performance_group",
+):
+    """Return participant and group tables using the full assigned population.
+
+    Participant metrics describe distributions across eligible environments.
+    Group metric medians/IQRs describe participant medians, with equal weight per
+    participant. Coverage includes participants without any eligible first hits.
+    """
+    pid = _viz.choose_participant_id_col(population, participant_id_col)
+    membership = population[[pid, group_col]].drop_duplicates()
+    if membership[pid].duplicated().any():
+        raise ValueError("Each participant must have a single performance group")
+    participants = membership.merge(
+        population.groupby(pid, observed=True).env.nunique().rename("n_environments"), on=pid,
+    )
+    eligible = events.loc[events.eligible.eq(True)]
+    for name, frame in [("n_first_hits", events), ("n_eligible_environments", eligible)]:
+        counts = frame.groupby(pid, observed=True).size().rename(name)
+        participants = participants.merge(counts, on=pid, how="left")
+        participants[name] = participants[name].fillna(0).astype(int)
+    participants["n_never_hit"] = participants.n_environments - participants.n_first_hits
+    participants["n_ineligible_first_hits"] = participants.n_first_hits - participants.n_eligible_environments
+    for metric in FIRST_HIT_METRICS:
+        stats = eligible.groupby(pid, observed=True)[metric].agg(count="count", median="median", iqr=_iqr, min="min", max="max")
+        stats = stats.add_prefix(f"{metric}_")
+        participants = participants.merge(stats, on=pid, how="left")
+        participants[f"{metric}_count"] = participants[f"{metric}_count"].fillna(0).astype(int)
+    rows = []
+    order = _performance_group_order_from_data(population, group_col)
+    for group in order:
+        members = participants.loc[participants[group_col].eq(group)]
+        row = {group_col: group, "n_participants": len(members),
+               "n_contributing_participants": int(members.n_eligible_environments.gt(0).sum())}
+        for col in ["n_environments", "n_first_hits", "n_eligible_environments", "n_never_hit", "n_ineligible_first_hits"]:
+            row[col] = int(members[col].sum())
+        for metric in FIRST_HIT_METRICS:
+            values = members[f"{metric}_median"].dropna()
+            row.update({f"{metric}_median": values.median(), f"{metric}_iqr": _iqr(values),
+                        f"{metric}_n_participants": len(values)})
+        rows.append(row)
+    return participants, pd.DataFrame(rows)
+
+
+def plot_first_global_max_by_performance(
+    events: pd.DataFrame, population: pd.DataFrame, *,
+    participant_id_col: Optional[str] = None, group_col: str = "performance_group",
+    bins: int = 15, show: bool = False,
+):
+    """Plot equal-participant histogram mixtures; dashed lines mark median of medians.
+
+    Histogram densities are averaged to preserve equal participant weighting
+    and unit area; no Gaussian fit is used.
+    """
+    pid = _viz.choose_participant_id_col(population, participant_id_col)
+    membership = population[[pid, group_col]].drop_duplicates()
+    work = events.loc[events.eligible.eq(True)].merge(membership, on=pid, validate="many_to_one")
+    order = _performance_group_order_from_data(population, group_col)
+    colors = _performance_group_colors(order)
+    figures = {}
+    for metric in FIRST_HIT_METRICS:
+        edges = _viz.first_hit_histogram_edges(work[metric], bins)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        for group in order:
+            subset = work.loc[work[group_col].eq(group)]
+            histograms, medians = [], []
+            for _, participant in subset.groupby(pid, observed=True):
+                values = pd.to_numeric(participant[metric], errors="coerce").dropna()
+                if not values.empty:
+                    counts, _ = np.histogram(values, bins=edges)
+                    histograms.append(counts / len(values) / np.diff(edges))
+                    medians.append(values.median())
+            label = f"{group} (participants={len(medians)})"
+            if histograms:
+                ax.stairs(np.mean(histograms, axis=0), edges, color=colors[group], label=label)
+                ax.axvline(np.median(medians), color=colors[group], linestyle="--", alpha=0.7)
+            else:
+                ax.plot([], [], color=colors[group], label=f"{label}: no eligible values")
+        ax.set(xlabel=metric.replace("_", " "), ylabel="Density (equal participant weights)",
+               title="Before Mexican Hat discovery")
+        ax.legend()
+        fig.tight_layout()
+        figures[metric] = (fig, ax)
+    if show:
+        plt.show()
+    return figures
+
+
 def _sem(values: pd.Series) -> float:
     values = pd.to_numeric(values, errors="coerce").dropna()
     if len(values) <= 1:

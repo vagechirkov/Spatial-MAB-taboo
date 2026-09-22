@@ -65,6 +65,90 @@ NOTEBOOK_VISUALIZATIONS = [
 ]
 
 
+def plot_choice_reselection_by_participant(
+    participant_summary: pd.DataFrame, *, participant_id_col: Optional[str] = None,
+    max_cols: int = 4, show: bool = False,
+):
+    """One participant panel with reselection fractions for observed environments."""
+    if max_cols < 1:
+        raise ValueError("max_cols must be positive")
+    pid = choose_participant_id_col(participant_summary, participant_id_col)
+    participants = sorted(participant_summary[pid].unique(), key=str)
+    envs = sorted(participant_summary.env.unique())
+    positions = {env: index for index, env in enumerate(envs)}
+    n_cols = min(max_cols, max(1, len(participants)))
+    n_rows = max(1, math.ceil(len(participants) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows),
+                             sharex=True, sharey=True, squeeze=False)
+    for ax, participant in zip(axes.flat, participants):
+        rows = participant_summary.loc[participant_summary[pid].eq(participant)]
+        ax.bar(rows.env.map(positions), rows.reselection_fraction, color="tab:blue", alpha=.8)
+        ax.set(title=f"Participant {participant}", ylim=(0, 1),
+               xticks=list(positions.values()), xticklabels=[str(e) for e in envs])
+        ax.grid(axis="y", alpha=.2)
+    for ax in axes.flat[len(participants):]:
+        ax.set_visible(False)
+    if not participants:
+        axes.flat[0].set_visible(True)
+        axes.flat[0].set_ylim(0, 1)
+        axes.flat[0].text(.5, .5, "No observations", ha="center", transform=axes.flat[0].transAxes)
+    fig.supxlabel("Environment")
+    fig.supylabel("Fraction of turns reselecting a past choice")
+    fig.suptitle("Reselection of previously chosen cells")
+    fig.tight_layout()
+    if show:
+        plt.show()
+    return fig, axes
+
+
+def first_hit_histogram_edges(values: pd.Series, bins: int = 15) -> np.ndarray:
+    """Common histogram edges, including empty and constant distributions."""
+    values = pd.to_numeric(values, errors="coerce")
+    values = values[np.isfinite(values)]
+    return np.histogram_bin_edges(values.to_numpy(dtype=float), bins=bins)
+
+
+def plot_first_global_max_participant_distributions(
+    events: pd.DataFrame, population: pd.DataFrame, *,
+    participant_id_col: Optional[str] = None, bins: int = 15,
+    max_cols: int = 4, show: bool = False,
+):
+    """First-hit medians/IQRs across environments; dashed lines mark medians."""
+    pid = choose_participant_id_col(population, participant_id_col)
+    participants = sorted(population[pid].dropna().unique(), key=str)
+    eligible = events.loc[events.eligible.eq(True)]
+    figures = {}
+    for metric in ("search_distance_median", "search_distance_iqr", "reward_median", "reward_iqr"):
+        edges = first_hit_histogram_edges(eligible[metric], bins)
+        n_cols = min(max_cols, max(1, len(participants)))
+        n_rows = max(1, math.ceil(len(participants) / n_cols))
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 2.8 * n_rows),
+                                 sharex=True, sharey=True, squeeze=False)
+        for ax, participant in zip(axes.flat, participants):
+            subset = eligible.loc[eligible[pid].eq(participant)]
+            values = pd.to_numeric(subset[metric], errors="coerce").dropna()
+            if values.empty:
+                ax.text(0.5, 0.5, "No eligible values", transform=ax.transAxes, ha="center")
+            else:
+                ax.hist(values, bins=edges, density=True, alpha=0.8, edgecolor="white")
+                ax.axvline(values.median(), color="black", linestyle="--", linewidth=1)
+            ax.set_title(f"Participant {participant} (eligible envs={len(subset)})")
+            ax.grid(axis="y", alpha=0.2)
+        for ax in axes.flat[len(participants):]:
+            ax.set_visible(False)
+        if not participants:
+            axes.flat[0].set_visible(True)
+            axes.flat[0].text(0.5, 0.5, "No participants", ha="center")
+        fig.supxlabel(metric.replace("_", " "))
+        fig.supylabel("Density")
+        fig.suptitle("Before first global-max radius hit: distributions across environments")
+        fig.tight_layout()
+        figures[metric] = (fig, axes)
+    if show:
+        plt.show()
+    return figures
+
+
 def parse_json_grid_files(grid_loader_path: Path) -> List[str]:
     """Extract active jsonGridFiles from gridLoader.js, ignoring comments."""
     text = grid_loader_path.read_text(encoding="utf-8")
